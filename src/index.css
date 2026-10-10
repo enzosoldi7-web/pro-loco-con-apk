@@ -1,0 +1,142 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --color-canvas: #f6f4ee;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    background-color: #f6f4ee;
+    color: #1c1917;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  ::selection {
+    background-color: #e5dec9;
+    color: #064e3b;
+  }
+}
+
+/* Custom Soft Scrollbars in warm greige */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d8d1c5;
+  border-radius: 9999px;
+  border: 2px solid #f6f4ee;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #b8b0a0;
+}
+
+@layer utilities {
+  .soft-glass {
+    background: rgba(253, 252, 249, 0.92);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(226, 220, 208, 0.85);
+  }
+
+  .soft-card {
+    background-color: #ffffff;
+    border: 1px solid rgba(228, 222, 212, 0.9);
+    box-shadow: 0 2px 14px -4px rgba(45, 38, 30, 0.04);
+    transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .soft-card:hover {
+    border-color: rgba(206, 198, 185, 0.95);
+    box-shadow: 0 6px 20px -4px rgba(45, 38, 30, 0.08);
+    transform: translateY(-1.5px);
+  }
+
+  /* Micro-animations */
+  @keyframes fadeInScale {
+    from {
+      opacity: 0;
+      transform: scale(0.98) translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+    }
+  }
+
+  @keyframes slideInUp {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes pulseSubtle {
+    0%, 100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.88;
+      transform: scale(1.02);
+    }
+  }
+
+  .animate-fade-scale {
+    animation: fadeInScale 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .animate-slide-up {
+    animation: slideInUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .animate-subtle-pulse {
+    animation: pulseSubtle 3s ease-in-out infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, ::before, ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  @media print {
+    body {
+      background-color: white !important;
+      color: black !important;
+    }
+    .no-print {
+      display: none !important;
+    }
+    .print-only {
+      display: block !important;
+    }
+    .print-card-container {
+      box-shadow: none !important;
+      border: 1px solid #cbd5e1 !important;
+      page-break-inside: avoid;
+    }
+  }
+}
+

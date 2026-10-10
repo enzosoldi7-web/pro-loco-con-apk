@@ -1,0 +1,8 @@
+{
+  "name": "Remix Gestione Pro Loco X APK",
+  "description": "Gestionale per associazione Pro Loco con anagrafica soci, registro quote associative e tesseramento digitale.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
