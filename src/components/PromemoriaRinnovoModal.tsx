@@ -1,8 +1,9 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Socio, ProLocoInfo } from '../types';
 import {
   getPublicPortalOrigin,
   getActiveTryCloudflareUrl,
+  fetchActiveTunnelUrl,
   syncDatabaseToServer
 } from '../storage';
 import { 
@@ -81,6 +82,17 @@ export const PromemoriaRinnovoModal: React.FC<PromemoriaRinnovoModalProps> = ({
   const [copiatoId, setCopiatoId] = useState<string | null>(null);
   const [copiatoTutti, setCopiatoTutti] = useState<boolean>(false);
   const [copiatoEmailList, setCopiatoEmailList] = useState<boolean>(false);
+  const [tunnelUrl, setTunnelUrl] = useState<string | null>(() => getActiveTryCloudflareUrl());
+
+  useEffect(() => {
+    let mounted = true;
+    fetchActiveTunnelUrl(false).then(url => {
+      if (mounted && url) setTunnelUrl(url);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // Cambio template
   const handleCambiaTemplate = (tipo: TipoTemplatePromemoria) => {
@@ -146,62 +158,30 @@ export const PromemoriaRinnovoModal: React.FC<PromemoriaRinnovoModalProps> = ({
 
   // Azioni canali
   const pulisciTelefono = (tel: string) => {
-    return tel.replace(/[^0-9+]/g, '');
+    const digits = (tel || '').replace(/[^0-9]/g, '');
+    if (!digits) return '';
+    return digits.startsWith('39') ? digits : `39${digits}`;
   };
 
-  const apriWhatsApp = async (dettaglio: DettaglioSocioRinnovo) => {
+  const apriWhatsApp = (dettaglio: DettaglioSocioRinnovo) => {
     syncDatabaseToServer();
     const tel = pulisciTelefono(dettaglio.socio.telefono);
-    const publicOrigin = getActiveTryCloudflareUrl() || getPublicPortalOrigin();
+    const publicOrigin = (tunnelUrl && tunnelUrl.includes('.trycloudflare.com')) ? tunnelUrl : getPublicPortalOrigin();
     const tesseraClean = (dettaglio.socio.numeroTessera || 'SOCIO').trim().toUpperCase();
     const slugTessera = tesseraClean.replace(/[^a-zA-Z0-9_]/g, '_');
     const nomeFileApk = `Socio_${slugTessera}.apk`;
     const pinSocio = (dettaglio.socio.pin && dettaglio.socio.pin.trim()) ? dettaglio.socio.pin.trim() : '1234';
     const socioQuery = `?p=${encodeURIComponent(pinSocio)}&n=${encodeURIComponent(dettaglio.socio.nome || '')}&c=${encodeURIComponent(dettaglio.socio.cognome || '')}`;
-    const linkFileApk = `/apk/${encodeURIComponent(tesseraClean)}.apk${socioQuery}`;
     const linkFileApkPubblico = `${publicOrigin}/apk/${encodeURIComponent(tesseraClean)}.apk${socioQuery}`;
     const linkInstallatore = `${publicOrigin}/inst/${encodeURIComponent(tesseraClean)}${socioQuery}`;
 
     const testoBase = compilaTemplatePromemoria(testoCustom, dettaglio, annoSelezionato, config);
     const testoCompleto = `${testoBase}\n\n📲 *Scarica File APK App Socio (${nomeFileApk}):*\n${linkFileApkPubblico}\n🔗 *Installazione Rapida:* ${linkInstallatore}\n🎫 *Tessera:* ${tesseraClean} | 🔑 *PIN:* ${pinSocio}`;
 
-    try {
-      const response = await fetch(linkFileApk);
-      if (response.ok) {
-        const blob = await response.blob();
-        const file = new File([blob], nomeFileApk, {
-          type: 'application/vnd.android.package-archive'
-        });
-        const nav = navigator as Navigator & {
-          canShare?: (data?: ShareData) => boolean;
-        };
-        if (typeof nav.share === 'function' && typeof nav.canShare === 'function' && nav.canShare({ files: [file] })) {
-          await nav.share({
-            title: nomeFileApk,
-            text: testoCompleto,
-            files: [file]
-          });
-          return;
-        }
-        const blobUrl = URL.createObjectURL(blob);
-        const dlLink = document.createElement('a');
-        dlLink.href = blobUrl;
-        dlLink.setAttribute('download', nomeFileApk);
-        document.body.appendChild(dlLink);
-        dlLink.click();
-        document.body.removeChild(dlLink);
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
-      }
-    } catch {
-      const dlLink = document.createElement('a');
-      dlLink.href = linkFileApk;
-      dlLink.setAttribute('download', nomeFileApk);
-      document.body.appendChild(dlLink);
-      dlLink.click();
-      document.body.removeChild(dlLink);
-    }
+    const url = tel
+      ? `https://wa.me/${tel}?text=${encodeURIComponent(testoCompleto)}`
+      : `https://api.whatsapp.com/send?text=${encodeURIComponent(testoCompleto)}`;
 
-    const url = `https://wa.me/${tel}?text=${encodeURIComponent(testoCompleto)}`;
     const waLink = document.createElement('a');
     waLink.href = url;
     waLink.target = '_blank';

@@ -1,4 +1,4 @@
-import { Socio, ProLocoInfo, QuotaAssociativa, StatoQuota, ProLocoEvento, StandEvento, SitoWebConfig, GiornalinoConfig, ArticoloGiornalino, EdizioneGiornalino, DonazioneTerzi, CampagnaRaccoltaFondi, ElementoCestino, ComunicazioneSocio } from './types';
+import { Socio, ProLocoInfo, QuotaAssociativa, StatoQuota, ProLocoEvento, StandEvento, SitoWebConfig, GiornalinoConfig, ArticoloGiornalino, EdizioneGiornalino, DonazioneTerzi, CampagnaRaccoltaFondi, ElementoCestino, ComunicazioneSocio, MovimentoContabile } from './types';
 import { calcolaEconomiaEvento, aggregaEventiPerBilancio } from './utils/eventoHelpers';
 
 const STORAGE_KEY_SOCI = 'proloco_gestione_soci_v1';
@@ -13,6 +13,7 @@ export const STORAGE_KEY_CAMPAGNE_DONAZIONI = 'proloco_campagne_donazioni_v1';
 export const STORAGE_KEY_CESTINO = 'proloco_gestione_cestino_v1';
 export const STORAGE_KEY_COMUNICAZIONI_SOCI = 'proloco_comunicazioni_soci_v1';
 export const STORAGE_KEY_SESSIONE_SOCIO = 'proloco_sessione_socio_id_v1';
+export const STORAGE_KEY_MOVIMENTI_CONTABILI = 'proloco_movimenti_contabili_v1';
 
 export const DEFAULT_GIORNALINO_CONFIG: GiornalinoConfig = {
   testata: 'La Voce della Pro Loco',
@@ -2613,6 +2614,156 @@ export function saveCampagneFondi(campagne: CampagnaRaccoltaFondi[]): void {
 }
 
 // =====================================================================
+// GESTIONE CONTABILE SEMPLIFICATA (PRIMA NOTA: ENTRATE & USCITE)
+// =====================================================================
+
+export const INITIAL_MOVIMENTI_CONTABILI: MovimentoContabile[] = [
+  {
+    id: 'mov-1',
+    data: '2026-01-15',
+    tipo: 'entrata',
+    descrizione: 'Incasso Quote Associative Tesseramento Annuale UNPLI (Primi 30 Soci)',
+    importo: 450,
+    categoria: 'quote_associative',
+    metodoPagamento: 'Contanti / POS',
+    anno: 2026,
+    note: 'Campagna tesseramento invernale registrata presso la sede'
+  },
+  {
+    id: 'mov-2',
+    data: '2026-02-02',
+    tipo: 'entrata',
+    descrizione: 'Donazione Liberale Sostenitore - Ditta Fratelli Neri Costruzioni',
+    importo: 500,
+    categoria: 'donazioni_liberalita',
+    metodoPagamento: 'Bonifico Bancario',
+    anno: 2026,
+    note: 'Contributo con quietanza per restauro capitello votivo'
+  },
+  {
+    id: 'mov-3',
+    data: '2026-02-18',
+    tipo: 'uscita',
+    descrizione: 'Acquisto materiale promozionale, manifesti e depliant per Rassegna Primavera',
+    importo: 180,
+    categoria: 'cancelleria_tipografia',
+    metodoPagamento: 'Bonifico Bancario',
+    anno: 2026,
+    note: 'Fattura Tipografia Sociale n. 12/2026'
+  },
+  {
+    id: 'mov-4',
+    data: '2026-03-05',
+    tipo: 'entrata',
+    descrizione: 'Contributo Istituzionale Comune per Valorizzazione Borgo Antico',
+    importo: 1200,
+    categoria: 'contributi_pubblici',
+    metodoPagamento: 'Bonifico Bancario',
+    anno: 2026,
+    note: 'Determina comunale n. 88/2026'
+  },
+  {
+    id: 'mov-5',
+    data: '2026-03-22',
+    tipo: 'uscita',
+    descrizione: 'Acquisto materiali e provviste stand enogastronomici (Sagra Tradizionale)',
+    importo: 420.50,
+    categoria: 'materiali_attrezzature',
+    metodoPagamento: 'Carta di Debito / POS',
+    anno: 2026,
+    note: 'Fornitura prodotti alimentari a km zero'
+  },
+  {
+    id: 'mov-6',
+    data: '2026-04-10',
+    tipo: 'uscita',
+    descrizione: 'Polizza Assicurativa Annuale Responsabilità Civile Terzi & Volontari',
+    importo: 350,
+    categoria: 'assicurazioni',
+    metodoPagamento: 'Bonifico Bancario',
+    anno: 2026,
+    note: 'Convenzione UNPLI Polizza UnipolSai'
+  },
+  {
+    id: 'mov-7',
+    data: '2026-04-28',
+    tipo: 'entrata',
+    descrizione: 'Sponsorizzazione Ufficiale Banca del Territorio BCC',
+    importo: 600,
+    categoria: 'sponsor_partner',
+    metodoPagamento: 'Bonifico Bancario',
+    anno: 2026,
+    note: 'Accordo di partenariato eventi estivi'
+  },
+  {
+    id: 'mov-8',
+    data: '2026-05-15',
+    tipo: 'uscita',
+    descrizione: 'Noleggio palco, impianto audio/luci e diritti SIAE Festa del Patrono',
+    importo: 580,
+    categoria: 'spese_eventi',
+    metodoPagamento: 'Bonifico Bancario',
+    anno: 2026,
+    note: 'Permesso SIAE n. 4521/2026 e service audio'
+  }
+];
+
+export function loadMovimentiContabili(): MovimentoContabile[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_MOVIMENTI_CONTABILI);
+    if (raw === null) {
+      localStorage.setItem(STORAGE_KEY_MOVIMENTI_CONTABILI, JSON.stringify(INITIAL_MOVIMENTI_CONTABILI));
+      return INITIAL_MOVIMENTI_CONTABILI;
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      localStorage.setItem(STORAGE_KEY_MOVIMENTI_CONTABILI, JSON.stringify(INITIAL_MOVIMENTI_CONTABILI));
+      return INITIAL_MOVIMENTI_CONTABILI;
+    }
+    return parsed;
+  } catch (err) {
+    console.error('Errore caricamento movimenti contabili:', err);
+    return INITIAL_MOVIMENTI_CONTABILI;
+  }
+}
+
+export function saveMovimentiContabili(movimenti: MovimentoContabile[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEY_MOVIMENTI_CONTABILI, JSON.stringify(movimenti));
+    syncDatabaseToServer({ movimentiContabili: movimenti });
+  } catch (err) {
+    console.error('Errore salvataggio movimenti contabili:', err);
+  }
+}
+
+export function esportaMovimentiContabiliCSV(movimenti: MovimentoContabile[], anno?: number): void {
+  const movs = anno ? movimenti.filter(m => m.anno === anno) : movimenti;
+  const header = ['ID', 'Data', 'Tipo', 'Descrizione', 'Categoria', 'Importo (€)', 'Metodo Pagamento', 'Anno', 'Note'];
+  const rows = movs.map(m => [
+    m.id,
+    m.data,
+    m.tipo.toUpperCase(),
+    `"${(m.descrizione || '').replace(/"/g, '""')}"`,
+    `"${(m.categoria || '').replace(/"/g, '""')}"`,
+    m.tipo === 'entrata' ? m.importo.toFixed(2) : `-${m.importo.toFixed(2)}`,
+    `"${(m.metodoPagamento || '').replace(/"/g, '""')}"`,
+    m.anno,
+    `"${(m.note || '').replace(/"/g, '""')}"`
+  ]);
+
+  const csvContent = '\uFEFF' + [header.join(';'), ...rows.map(r => r.join(';'))].join('\r\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  link.setAttribute('download', `Registro_Contabilita_Prima_Nota_${anno || 'Completo'}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+// =====================================================================
 // CESTINO DI SISTEMA & REGISTRO AUDIT STORICO (PUNTO 1.4 E GENERALI)
 // =====================================================================
 
@@ -3151,7 +3302,8 @@ export function esportaBackupJSON(
     giornalino: giornalinoAttivo, // Chiave legacy per compatibilità con vecchie versioni
     giornalinoAttivoId: loadGiornalinoAttivoId(),
     cestino: cestino || loadCestino(),
-    comunicazioni: comunicazioni || loadComunicazioniSoci()
+    comunicazioni: comunicazioni || loadComunicazioniSoci(),
+    movimentiContabili: loadMovimentiContabili()
   };
   const jsonString = JSON.stringify(data, null, 2);
   const blob = new Blob([jsonString], { type: 'application/json' });
@@ -3714,52 +3866,95 @@ export function setTesseraSbloccataInSessione(numeroTessera: string | null): voi
   }
 }
 
-export const PUBLIC_CLOUD_PORTAL_ORIGIN = 'https://ais-pre-v5llbdiy3rvfmylfkwqz7p-81175282459.europe-west2.run.app';
-const STORAGE_KEY_TRYCLOUDFLARE_URL = 'proloco_active_trycloudflare_url';
+export const STORAGE_KEY_TRYCLOUDFLARE_URL = 'proloco_active_trycloudflare_url';
 
-export function getActiveTryCloudflareUrl(): string | null {
-  if (typeof window === 'undefined') return null;
+export function getActiveTryCloudflareUrl(): string {
+  if (typeof window === 'undefined') return '';
   try {
     if (window.location.hostname.endsWith('.trycloudflare.com')) {
       return window.location.origin;
     }
     const saved = localStorage.getItem(STORAGE_KEY_TRYCLOUDFLARE_URL);
-    if (saved && saved.includes('.trycloudflare.com')) {
+    if (saved && saved.includes('.trycloudflare.com') && !saved.includes('prostores-email-heat-scientific')) {
       return saved.trim().replace(/\/+$/, '');
     }
   } catch {
     // ignore
   }
-  return null;
+  return '';
 }
+
+export const PERMANENT_BRIDGE_URL = '';
+export const PUBLIC_CLOUD_PORTAL_ORIGIN = '';
 
 export function setActiveTryCloudflareUrl(url: string | null): void {
   if (typeof window === 'undefined') return;
   try {
-    if (url && url.includes('.trycloudflare.com')) {
-      localStorage.setItem(STORAGE_KEY_TRYCLOUDFLARE_URL, url.trim().replace(/\/+$/, ''));
-    } else if (url === '') {
-      localStorage.removeItem(STORAGE_KEY_TRYCLOUDFLARE_URL);
+    const prev = localStorage.getItem(STORAGE_KEY_TRYCLOUDFLARE_URL);
+    if (url && url.includes('.trycloudflare.com') && !url.includes('prostores-email-heat-scientific')) {
+      const clean = url.trim().replace(/\/+$/, '');
+      if (prev !== clean) {
+        localStorage.setItem(STORAGE_KEY_TRYCLOUDFLARE_URL, clean);
+        window.dispatchEvent(new CustomEvent('proloco-tunnel-updated', { detail: { url: clean } }));
+      }
+    } else if (url === '' || url === null) {
+      if (prev) {
+        localStorage.removeItem(STORAGE_KEY_TRYCLOUDFLARE_URL);
+        window.dispatchEvent(new CustomEvent('proloco-tunnel-updated', { detail: { url: '' } }));
+      }
     }
   } catch {
     // ignore
   }
 }
 
-export async function fetchActiveTunnelUrl(forceRestart: boolean = false): Promise<string | null> {
-  if (typeof window === 'undefined') return null;
+let activeWebEventSource: EventSource | null = null;
+export function initClientRealtimeTunnelStream(): void {
+  if (typeof window === 'undefined' || typeof EventSource === 'undefined') return;
+  if (activeWebEventSource) return;
+
+  try {
+    const es = new EventSource('/api/v2/stream');
+    activeWebEventSource = es;
+    es.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data || '{}');
+        if (msg && msg.tunnelUrl && typeof msg.tunnelUrl === 'string') {
+          setActiveTryCloudflareUrl(msg.tunnelUrl);
+        }
+        if (msg && (msg.type === 'tunnel_update' || msg.type === 'db_update')) {
+          window.dispatchEvent(new CustomEvent('proloco-server-sync-event', { detail: msg }));
+        }
+      } catch {
+        // ignore
+      }
+    };
+    es.onerror = () => {
+      try { es.close(); } catch {}
+      activeWebEventSource = null;
+      setTimeout(() => initClientRealtimeTunnelStream(), 8000);
+    };
+  } catch {
+    // ignore
+  }
+}
+
+export async function fetchActiveTunnelUrl(forceRestart: boolean = false): Promise<string> {
+  if (typeof window === 'undefined') return '';
   try {
     const endpoint = forceRestart ? '/api/tunnel/restart' : '/api/tunnel';
     const res = await fetch(endpoint, {
       method: forceRestart ? 'POST' : 'GET',
       cache: 'no-store'
     });
-    if (!res.ok) return getActiveTryCloudflareUrl();
-    const data = await res.json();
-    if (data && typeof data.tunnelUrl === 'string' && data.tunnelUrl.includes('.trycloudflare.com')) {
-      const clean = data.tunnelUrl.trim().replace(/\/+$/, '');
-      setActiveTryCloudflareUrl(clean);
-      return clean;
+    if (res.ok) {
+      const data = await res.json();
+      const candidate = (data && (data.tunnelUrl || data.publicOrigin)) as string | undefined;
+      if (candidate && typeof candidate === 'string' && candidate.includes('.trycloudflare.com') && !candidate.includes('prostores-email-heat-scientific')) {
+        const clean = candidate.trim().replace(/\/+$/, '');
+        setActiveTryCloudflareUrl(clean);
+        return clean;
+      }
     }
   } catch {
     // ignore
@@ -3767,46 +3962,27 @@ export async function fetchActiveTunnelUrl(forceRestart: boolean = false): Promi
   return getActiveTryCloudflareUrl();
 }
 
-/**
- * Restituisce l'origine pubblica HTTPS raggiungibile da smartphone su rete dati mobile (4G/5G) e Wi-Fi.
- * Se è attivo il tunnel diretto `https://....trycloudflare.com`, lo usa in via prioritaria così
- * il gestionale e l'applicazione APK rimangono sincronizzati in tempo reale sullo stesso server.
- */
 export function getPublicPortalOrigin(): string {
-  if (typeof window === 'undefined') return PUBLIC_CLOUD_PORTAL_ORIGIN;
+  if (typeof window === 'undefined') return '';
 
+  const hostname = window.location.hostname;
+  // 1. Se l'utente sta navigando direttamente tramite il tunnel trycloudflare
+  if (hostname.endsWith('.trycloudflare.com') && !hostname.includes('prostores-email-heat-scientific')) {
+    return window.location.origin;
+  }
+
+  // 2. Se è disponibile un tunnel TryCloudflare attivo (accessibile su WhatsApp da qualunque cellulare senza login o blocchi)
   const tunnelUrl = getActiveTryCloudflareUrl();
-  if (tunnelUrl) {
+  if (tunnelUrl && tunnelUrl.includes('.trycloudflare.com') && !tunnelUrl.includes('prostores-email-heat-scientific')) {
     return tunnelUrl;
   }
 
-  const origin = window.location.origin;
-  const hostname = window.location.hostname;
-
-  if (hostname.endsWith('.trycloudflare.com')) {
-    return origin;
+  // 3. Fallback sull'origine corrente
+  if (window.location.origin && window.location.origin !== 'null') {
+    return window.location.origin;
   }
 
-  if (hostname.startsWith('ais-dev-')) {
-    return origin.replace('://ais-dev-', '://ais-pre-');
-  }
-
-  const isLocalOrLan =
-    hostname === 'localhost' ||
-    hostname === '127.0.0.1' ||
-    hostname === '0.0.0.0' ||
-    hostname === '::1' ||
-    hostname.startsWith('192.168.') ||
-    hostname.startsWith('10.') ||
-    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname) ||
-    hostname.endsWith('.local') ||
-    window.location.protocol === 'file:';
-
-  if (isLocalOrLan) {
-    return PUBLIC_CLOUD_PORTAL_ORIGIN;
-  }
-
-  return origin;
+  return '';
 }
 
 export function loadBloccoPortaleSocio(): boolean {
@@ -4345,12 +4521,23 @@ export interface ApkVersionPolicy {
   minRequiredVersionCode: number;
   minRequiredVersionName: string;
   forceUpdate: boolean;
+  downloadApkUrl?: string;
   releaseNotes?: string;
 }
 
 const STORAGE_KEY_APK_VERSION_POLICY = 'proloco_apk_version_policy_v2';
 
 export const GESTIONALE_VERSION = '2.0.0';
+
+export const PERMANENT_APK_URL = '/apk/ProLoco.apk';
+
+export function getPermanentApkDownloadUrl(numeroTessera?: string, pin?: string): string {
+  const origin = getPublicPortalOrigin();
+  const clean = String(numeroTessera || '').trim().toUpperCase();
+  const query = pin ? `?p=${encodeURIComponent(pin.trim())}` : '';
+  const path = clean ? `/apk/${encodeURIComponent(clean)}.apk${query}` : '/apk/ProLoco.apk';
+  return origin ? `${origin}${path}` : path;
+}
 
 export const DEFAULT_APK_VERSION_POLICY: ApkVersionPolicy = {
   schemaVersion: 2,
@@ -4360,6 +4547,7 @@ export const DEFAULT_APK_VERSION_POLICY: ApkVersionPolicy = {
   minRequiredVersionCode: 1,
   minRequiredVersionName: '1.0.0',
   forceUpdate: false,
+  downloadApkUrl: PERMANENT_APK_URL,
   releaseNotes: 'Compatibilità bidirezionale /api/v1 + /api/v2 garantita tra qualsiasi versione di APK e Gestionale.'
 };
 
@@ -4434,6 +4622,7 @@ export function syncDatabaseToServer(partial?: Record<string, unknown>): void {
       giornalinoAttivoId: loadGiornalinoAttivoId(),
       giornalinoConfig: loadGiornalinoConfig(),
       apkVersionPolicy: loadApkVersionPolicy(),
+      movimentiContabili: loadMovimentiContabili(),
       ...(partial || {})
     };
 
@@ -4482,7 +4671,7 @@ export function syncDatabaseToServer(partial?: Record<string, unknown>): void {
         );
       });
 
-    // 2. Se c'è un tunnel trycloudflare memorizzato (e non siamo già su quell'origine), invia anche lì
+    // 2. Se è attivo un tunnel Cloudflare ed è diverso dall'origine corrente, sincronizza anche lì
     if (tunnelUrl && window.location.origin !== tunnelUrl) {
       fetch(`${tunnelUrl}/api/v2/db`, {
         method: 'POST',
@@ -4496,18 +4685,9 @@ export function syncDatabaseToServer(partial?: Record<string, unknown>): void {
             isSyncingWithServer = false;
             setPendingServerSync(false);
             emitNetworkStatusEvent();
-          } else {
-            console.error(
-              `[syncDatabaseToServer] Errore HTTP durante la sincronizzazione sul tunnel (${tunnelUrl}/api/v2/db): status ${res?.status} (${res?.statusText})`
-            );
           }
         })
-        .catch(err => {
-          console.error(
-            `[syncDatabaseToServer] Errore di rete durante la sincronizzazione verso il tunnel (${tunnelUrl}/api/v2/db):`,
-            err
-          );
-        });
+        .catch(() => {});
     }
   } catch (err) {
     isSyncingWithServer = false;
@@ -4530,8 +4710,9 @@ export function resetDatabaseOnServer(extra?: Record<string, unknown>): void {
       // ignore
     });
 
-    if (window.location.origin !== PUBLIC_CLOUD_PORTAL_ORIGIN) {
-      fetch(`${PUBLIC_CLOUD_PORTAL_ORIGIN}/api/db/reset`, {
+    const tunnel = getActiveTryCloudflareUrl();
+    if (tunnel && window.location.origin !== tunnel) {
+      fetch(`${tunnel}/api/db/reset`, {
         method: 'POST',
         mode: 'cors',
         headers: { 'Content-Type': 'application/json' },
@@ -4558,6 +4739,7 @@ export interface ServerDatabaseSnapshot {
   archivioGiornalini?: EdizioneGiornalino[];
   giornalinoAttivoId?: string;
   giornalinoConfig?: GiornalinoConfig;
+  movimentiContabili?: MovimentoContabile[];
   updatedAt?: number;
   server_updated_at?: number;
 }
@@ -4591,7 +4773,7 @@ export async function fetchDatabaseFromServer(): Promise<ServerDatabaseSnapshot 
       res = null;
     }
 
-    // Se NON siamo sul PC locale (es. siamo su smartphone/APK), prova anche il tunnel o il gateway cloud
+    // Se NON siamo sul PC locale (es. siamo su smartphone/APK), prova anche il tunnel cloud attivo
     // Sul PC locale (localhost) non sovrascriviamo mai il database locale con un database remoto diverso
     if (!isLocalHost) {
       const savedTunnel = getActiveTryCloudflareUrl();
@@ -4606,24 +4788,6 @@ export async function fetchDatabaseFromServer(): Promise<ServerDatabaseSnapshot 
           }
         } catch (err) {
           console.error(`[fetchDatabaseFromServer] Errore di rete contattando il tunnel (${savedTunnel}):`, err);
-          res = null;
-        }
-      }
-
-      if ((!res || !res.ok) && window.location.origin !== PUBLIC_CLOUD_PORTAL_ORIGIN) {
-        try {
-          res = await fetch(`${PUBLIC_CLOUD_PORTAL_ORIGIN}/api/v2/db${sinceQuery}`, { cache: 'no-store', mode: 'cors' });
-          if (!res || !res.ok) {
-            console.warn(
-              `[fetchDatabaseFromServer] Cloud Portal ${PUBLIC_CLOUD_PORTAL_ORIGIN}/api/v2/db non disponibile (status: ${res?.status}), tentativo fallback su /api/db...`
-            );
-            res = await fetch(`${PUBLIC_CLOUD_PORTAL_ORIGIN}/api/db${sinceQuery}`, { cache: 'no-store', mode: 'cors' });
-          }
-        } catch (err) {
-          console.error(
-            `[fetchDatabaseFromServer] Errore di rete contattando il Cloud Portal (${PUBLIC_CLOUD_PORTAL_ORIGIN}):`,
-            err
-          );
           res = null;
         }
       }
@@ -4776,6 +4940,9 @@ export async function fetchDatabaseFromServer(): Promise<ServerDatabaseSnapshot 
     }
     if (db.giornalinoConfig) {
       localStorage.setItem(STORAGE_KEY_GIORNALINO, JSON.stringify(db.giornalinoConfig));
+    }
+    if (Array.isArray(db.movimentiContabili)) {
+      localStorage.setItem(STORAGE_KEY_MOVIMENTI_CONTABILI, JSON.stringify(db.movimentiContabili));
     }
 
     // Applica eventuale payload del socio presente nell'URL (anche su linea dati mobile) sopra ai dati del server

@@ -76,6 +76,7 @@ import {
 import { calcolaRiepilogoQuoteSoci } from '../utils/quoteHelpers';
 import { aggregaEventiPerBilancio } from '../utils/eventoHelpers';
 import { DashboardAnalyticsSection } from './DashboardAnalyticsSection';
+import { ServerOfficeMenu } from './ServerOfficeMenu';
 
 interface DashboardViewProps {
   config: ProLocoInfo;
@@ -248,65 +249,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     <Award className="w-3.5 h-3.5 text-emerald-600" />
                     {config.codiceUnpli ? 'UNPLI' : 'APS Pro Loco'}
                   </span>
-                  <span
-                    className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-extrabold font-mono bg-emerald-800 text-white border border-emerald-700 shadow-2xs"
-                    title="Versione aggiornamento del Gestionale (compatibile bidirezionalmente con tutte le versioni APK)"
-                  >
-                    Versione v{GESTIONALE_VERSION}
-                  </span>
-                  {/* Indicatore di Stato Visivo Connessione & Sincronizzazione Server (Verde / Giallo / Rosso) */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (hasPendingServerSync()) {
-                        syncDatabaseToServer();
-                      } else {
-                        fetchDatabaseFromServer();
-                      }
-                    }}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold border transition-all cursor-pointer select-none ${
-                      syncInfo.status === 'synced'
-                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
-                        : syncInfo.status === 'syncing'
-                        ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
-                        : 'bg-red-50 text-red-800 border-red-200 hover:bg-red-100'
-                    }`}
-                    title={
-                      syncInfo.status === 'synced'
-                        ? `Connesso al server e sincronizzato${syncInfo.lastSyncAt ? ` (ultimo allineamento: ${new Date(syncInfo.lastSyncAt).toLocaleTimeString('it-IT')})` : ''}. Clicca per verificare ora.`
-                        : syncInfo.status === 'syncing'
-                        ? 'Sincronizzazione bidirezionale col server in corso... Clicca per forzare il riallineamento.'
-                        : 'Offline / Server non raggiungibile: le modifiche vengono salvate in locale e sincronizzate automaticamente appena il server torna online.'
-                    }
-                  >
-                    <span className="relative flex h-2.5 w-2.5">
-                      <span
-                        className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                          syncInfo.status === 'synced'
-                            ? 'bg-emerald-400'
-                            : syncInfo.status === 'syncing'
-                            ? 'bg-amber-400'
-                            : 'bg-red-400'
-                        }`}
-                      />
-                      <span
-                        className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                          syncInfo.status === 'synced'
-                            ? 'bg-emerald-500'
-                            : syncInfo.status === 'syncing'
-                            ? 'bg-amber-500'
-                            : 'bg-red-500'
-                        }`}
-                      />
-                    </span>
-                    <span>
-                      {syncInfo.status === 'synced'
-                        ? 'Sincronizzato'
-                        : syncInfo.status === 'syncing'
-                        ? 'Sincronizzazione...'
-                        : 'Offline'}
-                    </span>
-                  </button>
                 </div>
                 <p className="text-xs text-slate-500 flex flex-wrap items-center gap-2 mt-0.5">
                   <span>C.F. {config.codiceFiscale}</span>
@@ -518,6 +460,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <span>Configurazione</span>
               </button>
 
+              {/* Tasto 4: Server Stile Office (Menu a scomparsa per stato e tunnel di uscita) */}
+              <ServerOfficeMenu />
+
               {/* Tasto 5: Schermo Intero */}
               {onToggleFullscreen && (
                 <button
@@ -567,9 +512,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </span>
                 <span className="text-xs text-emerald-200 font-medium">
                   Anno Sociale {annoSelezionato}
-                </span>
-                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold font-mono bg-amber-400/20 text-amber-200 border border-amber-300/40">
-                  v{GESTIONALE_VERSION}
                 </span>
               </div>
               <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">

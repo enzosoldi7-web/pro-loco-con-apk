@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
+  PERMANENT_BRIDGE_URL,
   getPublicPortalOrigin,
   syncDatabaseToServer,
   fetchActiveTunnelUrl,
@@ -82,7 +83,7 @@ export const ApkModal: React.FC<ApkModalProps> = ({
   const slugTessera = tesseraClean.replace(/[^a-zA-Z0-9_]/g, '_');
   const nomeFileApk = tesseraClean ? `Socio_${slugTessera}.apk` : 'App_ProLoco.apk';
   const nomeFileZip = tesseraClean ? `Socio_${slugTessera}.apk.zip` : 'App_ProLoco.apk.zip';
-  const publicOrigin = tunnelUrl || getPublicPortalOrigin();
+  const publicOrigin = (tunnelUrl && tunnelUrl.includes('.trycloudflare.com')) ? tunnelUrl : getPublicPortalOrigin();
   const pinSocio = socio?.pin && socio.pin.trim() ? socio.pin.trim() : '1234';
   const socioQuery = socio
     ? `?p=${encodeURIComponent(pinSocio)}&n=${encodeURIComponent(socio.nome || '')}&c=${encodeURIComponent(socio.cognome || '')}`
@@ -90,7 +91,7 @@ export const ApkModal: React.FC<ApkModalProps> = ({
 
   const linkInstallatore = tesseraClean
     ? `${publicOrigin}/inst/${encodeURIComponent(tesseraClean)}`
-    : `${publicOrigin}/apk/ProLoco.apk`;
+    : `${publicOrigin}/inst`;
 
   const linkFileApk = tesseraClean
     ? `/apk/${encodeURIComponent(tesseraClean)}.apk${socioQuery}`
@@ -104,9 +105,17 @@ export const ApkModal: React.FC<ApkModalProps> = ({
     ? `/apk/${encodeURIComponent(tesseraClean)}.zip${socioQuery}`
     : `/apk/ProLoco.zip`;
 
-  const messaggioWhatsappApk = socio
+  const linkFileZipPubblico = tesseraClean
+    ? `${publicOrigin}/apk/${encodeURIComponent(tesseraClean)}.zip`
+    : `${publicOrigin}/apk/ProLoco.zip`;
+
+  let messaggioWhatsappApk = socio
     ? `Ciao ${socio.nome}, ecco l'App Android Ufficiale (${nomeFileApk}) e il tuo Portale Socio:\n\n📲 *Scarica File APK diretto (${nomeFileApk}):*\n${linkFileApkPubblico}\n\n🔗 *Link Installazione Rapida:*\n${linkInstallatore}\n\n🎫 *Tessera:* ${tesseraClean}\n🔑 *PIN:* ${pinSocio}`
     : `Scarica l'App Android Ufficiale (${nomeFileApk}):\n📲 File APK: ${linkFileApkPubblico}\n🔗 Installazione: ${linkInstallatore}`;
+
+  if (publicOrigin !== PERMANENT_BRIDGE_URL) {
+    messaggioWhatsappApk += `\n\n🌐 *Ponte Cloudflare Permanente:* ${PERMANENT_BRIDGE_URL}/apk/${encodeURIComponent(tesseraClean || 'ProLoco')}.apk`;
+  }
 
   const whatsappUrlApk = `https://wa.me/?text=${encodeURIComponent(messaggioWhatsappApk)}`;
 
@@ -116,8 +125,18 @@ export const ApkModal: React.FC<ApkModalProps> = ({
     setStatoWhatsapp('sending');
 
     try {
-      const response = await fetch(linkFileApk);
-      if (response.ok) {
+      // Prova a scaricare il file APK dal server locale/attivo o dal ponte Cloudflare permanente
+      let response = await fetch(linkFileApk).catch(() => null);
+      if (!response || !response.ok) {
+        response = await fetch(`${publicOrigin}${linkFileApk}`).catch(() => null);
+      }
+      if (!response || !response.ok) {
+        response = await fetch(`${PERMANENT_BRIDGE_URL}${linkFileApk}`, { mode: 'cors' }).catch(() => null);
+      }
+      if (!response || !response.ok) {
+        response = await fetch(linkFileApk);
+      }
+      if (response && response.ok) {
         const blob = await response.blob();
         const file = new File([blob], nomeFileApk, {
           type: 'application/vnd.android.package-archive'
@@ -149,7 +168,7 @@ export const ApkModal: React.FC<ApkModalProps> = ({
       }
     } catch {
       const dlLink = document.createElement('a');
-      dlLink.href = linkFileApk;
+      dlLink.href = `${PERMANENT_BRIDGE_URL}${linkFileApk}`;
       dlLink.setAttribute('download', nomeFileApk);
       document.body.appendChild(dlLink);
       dlLink.click();
@@ -170,7 +189,7 @@ export const ApkModal: React.FC<ApkModalProps> = ({
   const handleCopiaLink = () => {
     syncDatabaseToServer();
     try {
-      navigator.clipboard.writeText(linkInstallatore).catch(() => {});
+      navigator.clipboard.writeText(linkFileApkPubblico).catch(() => {});
     } catch {
       // ignore
     }
@@ -186,8 +205,9 @@ export const ApkModal: React.FC<ApkModalProps> = ({
     setTimeout(() => {
       setStatoApk('done');
       const link = document.createElement('a');
-      link.href = linkFileApk;
+      link.href = `${PERMANENT_BRIDGE_URL}${linkFileApk}`;
       link.setAttribute('download', nomeFileApk);
+      link.target = '_blank';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -203,8 +223,9 @@ export const ApkModal: React.FC<ApkModalProps> = ({
     setTimeout(() => {
       setStatoZip('done');
       const link = document.createElement('a');
-      link.href = linkFileZip;
+      link.href = `${PERMANENT_BRIDGE_URL}${linkFileZip}`;
       link.setAttribute('download', nomeFileZip);
+      link.target = '_blank';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);

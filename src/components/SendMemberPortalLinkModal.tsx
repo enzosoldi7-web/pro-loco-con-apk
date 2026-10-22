@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Socio, ProLocoInfo } from '../types';
 import {
+  PERMANENT_BRIDGE_URL,
   saveSessioneSocioId,
   saveBloccoPortaleSocio,
   setTesseraSbloccataInSessione,
@@ -116,39 +117,43 @@ export const SendMemberPortalLinkModal: React.FC<SendMemberPortalLinkModalProps>
   const pinSocio = socio.pin && socio.pin.trim() ? socio.pin.trim() : '1234';
   const tesseraClean = (socio.numeroTessera || '').trim().toUpperCase();
   const nomeDestinatario = `${socio.nome} ${socio.cognome}`.trim();
-  const publicOrigin = tunnelUrl || getPublicPortalOrigin();
+  const publicOrigin = (tunnelUrl && tunnelUrl.includes('.trycloudflare.com')) ? tunnelUrl : getPublicPortalOrigin();
   const pinToken = toBase64Url(pinSocio);
   const socioQuerySync = `pk=${encodeURIComponent(pinToken)}`;
   const apkQuerySync = `p=${encodeURIComponent(pinSocio)}`;
 
-  // 1. Link Portale Web dei Soci sincronizzato (corto e immediato su 4G/5G & Wi-Fi)
-  const fullSyncedUrl = buildSyncedMemberPortalUrl(socio, config, annoSelezionato, false);
-  const linkCortoPortale = tunnelUrl
-    ? `${tunnelUrl}/s/${encodeURIComponent(tesseraClean)}?${socioQuerySync}`
-    : fullSyncedUrl || `${publicOrigin}/s/${encodeURIComponent(tesseraClean)}?${socioQuerySync}`;
+  // 1. Link Portale Web dei Soci sincronizzato
+  const linkCortoPortale = `${publicOrigin}/s/${encodeURIComponent(tesseraClean)}?${socioQuerySync}`;
   const linkLocaleRelativo = `/?s=${encodeURIComponent(tesseraClean)}&${socioQuerySync}`;
 
   // 2. Link Corto APK, ZIP & Installatore Guidato Cellulare
-  const linkInstallatoreMobile = `${publicOrigin}/inst/${encodeURIComponent(tesseraClean)}`;
-  const linkFileApkPubblico = `${publicOrigin}/apk/${encodeURIComponent(tesseraClean)}.apk`;
+  const linkInstallatoreMobile = `${publicOrigin}/inst/${encodeURIComponent(tesseraClean)}?${apkQuerySync}`;
+  const linkFileApkPubblico = `${publicOrigin}/apk/${encodeURIComponent(tesseraClean)}.apk?${apkQuerySync}`;
   const linkFileApkDiretto = `/apk/${encodeURIComponent(tesseraClean)}.apk`;
   const linkFileZipDiretto = `/apk/${encodeURIComponent(tesseraClean)}.zip`;
   const slugTessera = tesseraClean.replace(/[^a-zA-Z0-9_]/g, '_');
   const nomeFileApk = `Socio_${slugTessera}.apk`;
   const nomeFileZip = `Socio_${slugTessera}.apk.zip`;
 
-  const messaggioInvio = `Gentile ${nomeDestinatario},
+  let messaggioInvio = `Gentile ${nomeDestinatario},
 ecco i tuoi dati per il Portale Soci (${config.nome} - v${GESTIONALE_VERSION}):
 
 • Destinatario: ${nomeDestinatario}
 • Numero Tessera: ${tesseraClean}
 • PIN: ${pinSocio}
 
-Link Portale Web dei Soci:
+🌐 Link Portale Web dei Soci:
 ${linkCortoPortale}
 
-📦 File App Android (${nomeFileApk} - v${GESTIONALE_VERSION}):
-${linkFileApkPubblico}?${apkQuerySync}`;
+📦 Download Diretto App Android (${nomeFileApk}):
+${linkFileApkPubblico}
+
+📲 Pagina Installazione Guidata:
+${linkInstallatoreMobile}`;
+
+  if (publicOrigin !== PERMANENT_BRIDGE_URL) {
+    messaggioInvio += `\n\n🌐 Ponte di Collegamento Permanente Cloudflare:\n${PERMANENT_BRIDGE_URL}/apk/${encodeURIComponent(tesseraClean)}.apk?${apkQuerySync}`;
+  }
 
   // Canali rapidi funzionali
   const telPulito = (telefonoInput || '').replace(/[^0-9]/g, '');
@@ -234,7 +239,7 @@ ${linkFileApkPubblico}?${apkQuerySync}`;
 
   const handleCopiaApk = () => {
     syncDatabaseToServer();
-    safeCopyToClipboard(linkInstallatoreMobile);
+    safeCopyToClipboard(linkFileApkPubblico);
     setCopiatoApk(true);
     setTimeout(() => setCopiatoApk(false), 2000);
   };
@@ -254,8 +259,9 @@ ${linkFileApkPubblico}?${apkQuerySync}`;
     setTimeout(() => {
       setStatoApk('done');
       const a = document.createElement('a');
-      a.href = `${linkFileApkDiretto}?${apkQuerySync}`;
+      a.href = `${PERMANENT_BRIDGE_URL}${linkFileApkDiretto}?${apkQuerySync}`;
       a.setAttribute('download', nomeFileApk);
+      a.target = '_blank';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -271,8 +277,9 @@ ${linkFileApkPubblico}?${apkQuerySync}`;
     setTimeout(() => {
       setStatoZip('done');
       const a = document.createElement('a');
-      a.href = `${linkFileZipDiretto}?${apkQuerySync}`;
+      a.href = `${PERMANENT_BRIDGE_URL}${linkFileZipDiretto}?${apkQuerySync}`;
       a.setAttribute('download', nomeFileZip);
+      a.target = '_blank';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -350,12 +357,6 @@ ${linkFileApkPubblico}?${apkQuerySync}`;
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            <span
-              className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 text-[11px] font-mono font-extrabold shadow-2xs select-none"
-              title="Versione aggiornamento App APK e Gestionale"
-            >
-              v{GESTIONALE_VERSION}
-            </span>
             <button
               onClick={onClose}
               className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"

@@ -61,6 +61,8 @@ import {
   applyUrlPortalSync,
   fetchDatabaseFromServer,
   syncDatabaseToServer,
+  fetchActiveTunnelUrl,
+  setActiveTryCloudflareUrl,
   buildSyncedMemberPortalUrl,
   GESTIONALE_VERSION
 } from './storage';
@@ -200,7 +202,10 @@ export default function App() {
         sse.onmessage = ev => {
           try {
             const payload = JSON.parse(ev.data || '{}');
-            if (payload && (payload.type === 'db_update' || payload.type === 'connected')) {
+            if (payload && payload.tunnelUrl && typeof payload.tunnelUrl === 'string') {
+              setActiveTryCloudflareUrl(payload.tunnelUrl);
+            }
+            if (payload && (payload.type === 'tunnel_update' || payload.type === 'db_update' || payload.type === 'connected')) {
               retryAttempt = 0;
               sincronizzaDalServer();
             }
@@ -243,6 +248,7 @@ export default function App() {
 
     sincronizzaDalServer();
     connectSseStream();
+    fetchActiveTunnelUrl(false).catch(() => {});
 
     const handleStorageChange = () => {
       if (!active) return;
@@ -986,12 +992,6 @@ export default function App() {
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2 shrink-0 relative z-10">
-                    <span
-                      className="px-2.5 py-2 rounded-xl bg-emerald-800/80 text-emerald-100 text-xs font-mono font-bold border border-emerald-500/40 shadow-2xs select-none"
-                      title="Versione aggiornamento del Gestionale (compatibile con tutte le versioni APK)"
-                    >
-                      v{GESTIONALE_VERSION}
-                    </span>
                     <button
                       id="btn-comunicazioni-newsletter-banner"
                       onClick={() => setTabGestionale('comunicazioni')}

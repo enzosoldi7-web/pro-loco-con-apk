@@ -1,4 +1,6 @@
 import express from 'express';
+import http from 'http';
+import dns from 'dns';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -1272,9 +1274,10 @@ function writeDbToDisk(data) {
   }
 }
 
+const PERMANENT_BRIDGE_TRYCLOUDFLARE_URL = process.env.PERMANENT_BRIDGE_URL || '';
+
 const PUBLIC_CLOUD_PORTAL_ORIGIN =
-  process.env.PUBLIC_PORTAL_URL ||
-  'https://ais-pre-v5llbdiy3rvfmylfkwqz7p-81175282459.europe-west2.run.app';
+  process.env.PUBLIC_PORTAL_URL || '';
 
 let activeTryCloudflareUrl: string = '';
 let activeTunnelInstance: any = null;
@@ -1283,15 +1286,30 @@ let isStartingTunnel = false;
 interface SseClient {
   id: string;
   res: express.Response;
+  clientInfo?: {
+    numeroTessera?: string;
+    versionCode?: number;
+    userAgent?: string;
+    ip?: string;
+  };
 }
 const sseClients: SseClient[] = [];
+
+interface RegisteredApkDevice {
+  numeroTessera?: string;
+  versionCode?: number;
+  lastSeenAt: number;
+  ip?: string;
+  callbackUrl?: string;
+}
+const registeredApkClients = new Map<string, RegisteredApkDevice>();
 
 function broadcastServerDbUpdate(db: any) {
   const payload = JSON.stringify({
     type: 'db_update',
     updatedAt: db?.updatedAt || Date.now(),
     server_updated_at: db?.server_updated_at || db?.updatedAt || Date.now(),
-    tunnelUrl: activeTryCloudflareUrl || null
+    tunnelUrl: activeTryCloudflareUrl || PERMANENT_BRIDGE_TRYCLOUDFLARE_URL
   });
   for (let i = sseClients.length - 1; i >= 0; i--) {
     try {
@@ -1302,144 +1320,306 @@ function broadcastServerDbUpdate(db: any) {
   }
 }
 
-async function startCloudflareQuickTunnel(port: number): Promise<string> {
-  if (activeTryCloudflareUrl && activeTunnelInstance) return activeTryCloudflareUrl;
-  if (isStartingTunnel) {
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 400));
-      if (activeTryCloudflareUrl) return activeTryCloudflareUrl;
+const PROLOCO_RELAY_TOPIC =
+  'proloco_tunnel_' +
+  (process.env.APPLET_ID || 'debd8d027b7e4e39b372')
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .slice(0, 24);
+
+function getSocioRelayTopic(tessera: string): string {
+  const norm = String(tessera || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  return norm ? `${PROLOCO_RELAY_TOPIC}_${norm}` : PROLOCO_RELAY_TOPIC;
+}
+
+// Invia l'indirizzo del tunnel a TUTTI gli APK e ai ponti di sincronizzazione ogni volta che il server si connette ad internet
+async function broadcastTunnelToAllApksAndRelays(tunnelUrl: string) {
+  if (!tunnelUrl) return;
+  const cleanUrl = String(tunnelUrl).trim().replace(/\/+$/, '');
+  activeTryCloudflareUrl = cleanUrl;
+  console.log(`[Tunnel Dispatcher] 🌐 Connessione ad Internet attiva! Invio indirizzo tunnel "${cleanUrl}" a tutti gli APK...`);
+
+  // 1. Salva subito il nuovo indirizzo nel database su disco
+  let db: any = {};
+  try {
+    db = readDbFromDisk() || {};
+    db.lastActiveTunnelUrl = cleanUrl;
+    db.lastTunnelAnnouncedAt = Date.now();
+    db.server_updated_at = Date.now();
+    writeDbToDisk(db);
+  } catch (err) {
+    console.error('[Tunnel Dispatcher] Errore aggiornamento database locale:', err);
+  }
+
+  // 2. Trasmetti evento dedicato ad alta priorità 'tunnel_update' via SSE a tutti gli APK connessi in tempo reale
+  const tunnelPayload = JSON.stringify({
+    type: 'tunnel_update',
+    tunnelUrl: cleanUrl,
+    publicOrigin: cleanUrl,
+    relayTopic: PROLOCO_RELAY_TOPIC,
+    updatedAt: Date.now(),
+    server_updated_at: Date.now(),
+    forceSync: true
+  });
+  let liveClientsNotified = 0;
+  for (let i = sseClients.length - 1; i >= 0; i--) {
+    try {
+      sseClients[i].res.write(`data: ${tunnelPayload}\n\n`);
+      liveClientsNotified++;
+    } catch {
+      sseClients.splice(i, 1);
     }
+  }
+
+  // 3. Trasmetti anche 'db_update' per scatenare immediatamente la sincronizzazione dati bidirezionale
+  const dbPayload = JSON.stringify({
+    type: 'db_update',
+    updatedAt: Date.now(),
+    server_updated_at: Date.now(),
+    tunnelUrl: cleanUrl,
+    forceSync: true
+  });
+  for (let i = sseClients.length - 1; i >= 0; i--) {
+    try {
+      sseClients[i].res.write(`data: ${dbPayload}\n\n`);
+    } catch {
+      sseClients.splice(i, 1);
+    }
+  }
+
+  console.log(`[Tunnel Dispatcher] 📡 Inviato nuovo tunnel a ${liveClientsNotified} APK client connessi in tempo reale (SSE).`);
+
+  // 4. PUBBLICAZIONE SUL CANALE DI RENDEZVOUS PUBBLICO PERMANENTE (ntfy.sh)
+  // Consente agli smartphone Android (anche su 4G/5G con vecchio tunnel scaduto) di scoprire il nuovo tunnel istantaneamente!
+  if (typeof fetch === 'function') {
+    // 4a. Pubblica sul topic generale della Pro Loco
+    try {
+      fetch(`https://ntfy.sh/${PROLOCO_RELAY_TOPIC}`, {
+        method: 'POST',
+        headers: {
+          'Title': 'Aggiornamento Tunnel Pro Loco',
+          'Tags': 'globe,arrows_counterclockwise',
+          'X-Tunnel-Url': cleanUrl
+        },
+        body: cleanUrl
+      }).catch(() => {});
+    } catch {}
+
+    // 4b. Pubblica sui canali univoci per ciascun Numero Tessera Socio registrato (come richiesto dall'utente)
+    const tessereUniche = new Set<string>();
+    if (Array.isArray(db.soci)) {
+      for (const s of db.soci) {
+        if (s && s.numeroTessera) {
+          tessereUniche.add(String(s.numeroTessera).trim().toUpperCase());
+        }
+      }
+    }
+    for (const [, dev] of registeredApkClients.entries()) {
+      if (dev && dev.numeroTessera) {
+        tessereUniche.add(String(dev.numeroTessera).trim().toUpperCase());
+      }
+    }
+
+    for (const t of tessereUniche) {
+      const socioTopic = getSocioRelayTopic(t);
+      try {
+        fetch(`https://ntfy.sh/${socioTopic}`, {
+          method: 'POST',
+          headers: {
+            'Title': `Nuovo Tunnel Pro Loco per Tessera ${t}`,
+            'Tags': 'id_card,satellite',
+            'X-Tunnel-Url': cleanUrl,
+            'X-Numero-Tessera': t
+          },
+          body: cleanUrl
+        }).catch(() => {});
+      } catch {}
+    }
+  }
+
+  // 5. Notifica eventuali ponti o webhook registrati
+  if (typeof fetch === 'function' && PERMANENT_BRIDGE_TRYCLOUDFLARE_URL) {
+    const announceEndpoints = [
+      `${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/api/v2/tunnel/announce`,
+      `${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/api/tunnel/announce`,
+      `${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/api/v2/db`
+    ];
+    for (const ep of announceEndpoints) {
+      fetch(ep, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-ProLoco-Sync-Hop': '1'
+        },
+        body: JSON.stringify({
+          tunnelUrl: cleanUrl,
+          lastActiveTunnelUrl: cleanUrl,
+          serverOnline: true,
+          announcedAt: Date.now()
+        })
+      }).catch(() => {});
+    }
+  }
+
+  for (const [, dev] of registeredApkClients.entries()) {
+    if (dev && dev.callbackUrl && typeof fetch === 'function') {
+      fetch(dev.callbackUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tunnelUrl: cleanUrl,
+          numeroTessera: dev.numeroTessera,
+          timestamp: Date.now()
+        })
+      }).catch(() => {});
+    }
+  }
+}
+
+async function startCloudflareQuickTunnel(port: number): Promise<string> {
+  if (activeTryCloudflareUrl && !activeTryCloudflareUrl.includes('prostores-email-heat-scientific')) {
     return activeTryCloudflareUrl;
+  }
+  if (isStartingTunnel) {
+    return new Promise((resolve) => {
+      let attempts = 0;
+      const interval = setInterval(() => {
+        attempts++;
+        if (activeTryCloudflareUrl && !activeTryCloudflareUrl.includes('prostores-email-heat-scientific')) {
+          clearInterval(interval);
+          resolve(activeTryCloudflareUrl);
+        } else if (attempts > 40) {
+          clearInterval(interval);
+          resolve(activeTryCloudflareUrl || PERMANENT_BRIDGE_TRYCLOUDFLARE_URL);
+        }
+      }, 250);
+    });
   }
 
   isStartingTunnel = true;
   try {
-    const cf = await import('cloudflared');
-    const binPath = cf.bin;
-    if (!fs.existsSync(binPath)) {
-      console.log('Installazione componente Cloudflare Tunnel (trycloudflare.com) in corso...');
-      await cf.install(binPath);
+    const cloudflared = await import('cloudflared');
+    const binPath = path.join(process.cwd(), 'node_modules/cloudflared/bin/cloudflared');
+    if (!fs.existsSync(binPath) && typeof (cloudflared as any).install === 'function') {
+      try {
+        await (cloudflared as any).install(binPath);
+      } catch (e) {
+        console.warn('[Cloudflare Quick Tunnel] Installazione automatica binario fallita:', e);
+      }
     }
+    const { Tunnel } = cloudflared;
+    const tunnel = Tunnel.quick(`http://localhost:${port}`, { '--protocol': 'http2' });
+    activeTunnelInstance = tunnel;
 
-    const { spawn } = await import('child_process');
-    const child = spawn(
-      binPath,
-      ['tunnel', '--protocol', 'http2', '--no-autoupdate', '--url', `http://127.0.0.1:${port}`],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-    activeTunnelInstance = {
-      process: child,
-      stop: () => {
-        try {
-          child.kill('SIGTERM');
-        } catch {
-          // ignore
+    return await new Promise<string>((resolve) => {
+      let resolved = false;
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          isStartingTunnel = false;
+          resolve(activeTryCloudflareUrl || PERMANENT_BRIDGE_TRYCLOUDFLARE_URL);
         }
-      }
-    };
+      }, 18000);
 
-    const extractUrl = (chunk: any) => {
-      const text = String(chunk || '');
-      const match = text.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
-      if (match && match[0]) {
-        const cleanUrl = match[0].trim().replace(/\/+$/, '');
-        if (activeTryCloudflareUrl !== cleanUrl) {
-          activeTryCloudflareUrl = cleanUrl;
-          console.log('===================================================================');
-          console.log(` Link Pubblico Portale Soci (HTTP/2 Tunnel Attivo): ${activeTryCloudflareUrl}`);
-          console.log('===================================================================');
-          const curDb = readDbFromDisk();
-          if (curDb && typeof curDb === 'object') {
-            curDb.lastActiveTunnelUrl = activeTryCloudflareUrl;
-            writeDbToDisk(curDb);
-            if (typeof fetch === 'function') {
-              fetch(`${PUBLIC_CLOUD_PORTAL_ORIGIN}/api/v2/db`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-ProLoco-Sync-Hop': '1' },
-                body: JSON.stringify(curDb)
-              }).catch(() => {});
-            }
-          }
-          broadcastServerDbUpdate(curDb);
+      tunnel.on('url', (url: string) => {
+        const cleanUrl = String(url || '').trim().replace(/\/+$/, '');
+        console.log(`[Cloudflare Quick Tunnel] Operativo su: ${cleanUrl}`);
+        isStartingTunnel = false;
+
+        // Distribuisci immediatamente il nuovo indirizzo a tutti gli APK
+        broadcastTunnelToAllApksAndRelays(cleanUrl).catch(() => {});
+
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          resolve(cleanUrl);
         }
-      }
-    };
+      });
 
-    if (child.stdout) child.stdout.on('data', extractUrl);
-    if (child.stderr) child.stderr.on('data', extractUrl);
-    child.on('error', () => {
-      // ignore
-    });
-    child.on('exit', () => {
-      activeTryCloudflareUrl = '';
-      activeTunnelInstance = null;
-      // Riconnette automaticamente il tunnel dopo 3 secondi se il processo cade
-      setTimeout(() => {
-        if (!activeTunnelInstance && !isStartingTunnel) {
+      tunnel.on('error', (err: any) => {
+        console.error('[Cloudflare Quick Tunnel] Errore:', err?.message || err);
+        isStartingTunnel = false;
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          resolve(activeTryCloudflareUrl || PERMANENT_BRIDGE_TRYCLOUDFLARE_URL);
+        }
+      });
+
+      tunnel.on('exit', (code: any) => {
+        console.warn(`[Cloudflare Quick Tunnel] Processo terminato (code ${code}). Riavvio automatico in 4s...`);
+        activeTunnelInstance = null;
+        isStartingTunnel = false;
+        setTimeout(() => {
           startCloudflareQuickTunnel(port).catch(() => {});
-        }
-      }, 3000);
+        }, 4000);
+      });
     });
-
-    // Attende fino a 12 secondi la generazione dell'URL https://....trycloudflare.com
-    for (let i = 0; i < 40; i++) {
-      if (activeTryCloudflareUrl) break;
-      await new Promise(r => setTimeout(r, 300));
-    }
-    return activeTryCloudflareUrl;
   } catch (err) {
-    console.warn('Avviso avvio tunnel trycloudflare:', err);
-    return '';
-  } finally {
+    console.error('[Cloudflare Quick Tunnel] Errore avvio:', err);
     isStartingTunnel = false;
+    return activeTryCloudflareUrl || PERMANENT_BRIDGE_TRYCLOUDFLARE_URL;
   }
 }
 
+// Monitor di Connessione ad Internet: verifica periodicamente e riavvia/invia il tunnel ad ogni ripristino
+let isInternetOnline = true;
+let internetCheckInterval: any = null;
+
+function checkInternetConnectivity(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.get('http://1.1.1.1', { timeout: 3000 }, (res) => {
+      res.resume();
+      resolve(true);
+    });
+    req.on('error', () => {
+      import('dns').then(dns => {
+        dns.lookup('google.com', (err) => {
+          resolve(!err);
+        });
+      }).catch(() => resolve(false));
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+function startInternetAndTunnelWatcher(port: number) {
+  if (internetCheckInterval) return;
+  internetCheckInterval = setInterval(async () => {
+    const online = await checkInternetConnectivity();
+    if (online && !isInternetOnline) {
+      console.log('[Internet Watcher] 🌐 Connessione ad Internet RILEVATA/RIPRISTINATA sul server!');
+      isInternetOnline = true;
+      activeTryCloudflareUrl = '';
+      const newUrl = await startCloudflareQuickTunnel(port).catch(() => '');
+      if (newUrl) {
+        broadcastTunnelToAllApksAndRelays(newUrl).catch(() => {});
+      }
+    } else if (!online && isInternetOnline) {
+      console.warn('[Internet Watcher] ⚠️ Connessione ad Internet assente o interrotta.');
+      isInternetOnline = false;
+    } else if (online && !activeTryCloudflareUrl && !isStartingTunnel) {
+      // Internet attivo ma nessun tunnel aperto
+      const newUrl = await startCloudflareQuickTunnel(port).catch(() => '');
+      if (newUrl) {
+        broadcastTunnelToAllApksAndRelays(newUrl).catch(() => {});
+      }
+    }
+  }, 10000);
+}
+
 function resolvePublicHostOrigin(req: express.Request): string {
-  // 1. Se il tunnel diretto https://....trycloudflare.com è attivo, ha priorità assoluta
-  // così il gestionale locale e l'applicazione APK comunicano in tempo reale sullo stesso database
+  const host = req.get('x-forwarded-host') || req.get('host');
+  const proto = req.get('x-forwarded-proto') || req.protocol || 'http';
   if (activeTryCloudflareUrl) {
     return activeTryCloudflareUrl;
   }
-
-  const rawHost = String(req.headers['x-forwarded-host'] || req.get('host') || '').split(',')[0].trim();
-  const hostname = rawHost.split(':')[0].toLowerCase();
-  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
-
-  if (hostname.endsWith('.trycloudflare.com')) {
-    return `https://${rawHost}`;
+  if (host) {
+    return `${proto}://${host}`;
   }
-
-  if (!hostname) return PUBLIC_CLOUD_PORTAL_ORIGIN;
-  if (hostname.startsWith('ais-dev-')) {
-    return `https://${rawHost.replace(/^ais-dev-/i, 'ais-pre-')}`;
-  }
-  const isLoopback =
-    hostname === 'localhost' ||
-    hostname === '127.0.0.1' ||
-    hostname === '0.0.0.0' ||
-    hostname === '::1';
-
-  const isLanAddress =
-    hostname.startsWith('192.168.') ||
-    hostname.startsWith('10.') ||
-    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname) ||
-    hostname.endsWith('.local');
-
-  if (isLanAddress) {
-    return `http://${rawHost}`;
-  }
-
-  if (isLoopback) {
-    const lanIps = getLocalLanIps();
-    if (lanIps.length > 0) {
-      const portPart = rawHost.includes(':') ? rawHost.split(':')[1] : '3000';
-      return `http://${lanIps[0]}:${portPart}`;
-    }
-    return PUBLIC_CLOUD_PORTAL_ORIGIN;
-  }
-
-  return `${proto}://${rawHost}`;
+  return '';
 }
 
 function toBase64UrlNode(str: string): string {
@@ -1480,6 +1660,7 @@ async function startServer() {
     minRequiredVersionCode: 1,
     minRequiredVersionName: '1.0.0',
     forceUpdate: false,
+    downloadApkUrl: `${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/apk/ProLoco.apk`,
     releaseNotes: 'Compatibilità bidirezionale totale tra tutte le versioni di APK e Gestionale.'
   };
 
@@ -1494,6 +1675,7 @@ async function startServer() {
       currentVersionCode: Number(custom.currentVersionCode || CURRENT_APK_VERSION_CODE),
       currentVersionName: String(custom.currentVersionName || CURRENT_APK_VERSION_NAME),
       gestionaleVersionName: String(custom.gestionaleVersionName || GESTIONALE_VERSION_NAME),
+      downloadApkUrl: `${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/apk/ProLoco.apk`,
       // Regola Tassativa: anche se la versione dell'APK e del Gestionale differiscono (es. APK v1.2 e Gestionale v1.5 o v2.0),
       // i due sistemi dialogano sempre senza generare errori di incompatibilità o blocchi di sistema.
       minRequiredVersionCode: 1,
@@ -1685,8 +1867,27 @@ async function startServer() {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.flushHeaders?.();
 
+    const rawT = String(req.query.tessera || req.query.s || req.headers['x-proloco-tessera'] || '').trim().toUpperCase();
+    const vCode = Number(req.query.versionCode || req.query.v || 1);
     const clientId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    sseClients.push({ id: clientId, res });
+    sseClients.push({
+      id: clientId,
+      res,
+      clientInfo: {
+        numeroTessera: rawT || undefined,
+        versionCode: vCode,
+        userAgent: req.get('user-agent'),
+        ip: req.ip
+      }
+    });
+    if (rawT) {
+      registeredApkClients.set(rawT, {
+        numeroTessera: rawT,
+        versionCode: vCode,
+        lastSeenAt: Date.now(),
+        ip: req.ip
+      });
+    }
 
     const currentDb = readDbFromDisk();
     const serverTs = currentDb?.server_updated_at || currentDb?.updatedAt || Date.now();
@@ -1694,7 +1895,8 @@ async function startServer() {
       type: 'connected',
       updatedAt: serverTs,
       server_updated_at: serverTs,
-      tunnelUrl: activeTryCloudflareUrl || null
+      tunnelUrl: activeTryCloudflareUrl || null,
+      forceSync: false
     });
     res.write(`data: ${initPayload}\n\n`);
 
@@ -1746,6 +1948,59 @@ async function startServer() {
     });
   });
 
+  // API: Ricezione annuncio tunnel da nodi remoti o bridge
+  app.post(['/api/tunnel/announce', '/api/v1/tunnel/announce', '/api/v2/tunnel/announce'], (req, res) => {
+    const incoming = req.body || {};
+    const url = String(incoming.tunnelUrl || incoming.url || '').trim().replace(/\/+$/, '');
+    if (url && url.includes('.trycloudflare.com') && !url.includes('prostores-email-heat-scientific')) {
+      activeTryCloudflareUrl = url;
+      try {
+        const db = readDbFromDisk() || {};
+        db.lastActiveTunnelUrl = url;
+        db.lastTunnelAnnouncedAt = Date.now();
+        writeDbToDisk(db);
+        broadcastTunnelToAllApksAndRelays(url).catch(() => {});
+      } catch {}
+    }
+    res.json({ ok: true, tunnelUrl: activeTryCloudflareUrl || null });
+  });
+
+  // API: Forza il broadcast immediato dell'indirizzo tunnel a tutti i canali univoci e al relay pubblico permanente
+  app.post(['/api/tunnel/broadcast', '/api/v1/tunnel/broadcast', '/api/v2/tunnel/broadcast'], async (req, res) => {
+    const incoming = req.body || {};
+    const url = String(incoming.tunnelUrl || incoming.url || activeTryCloudflareUrl || '').trim().replace(/\/+$/, '');
+    if (url) {
+      await broadcastTunnelToAllApksAndRelays(url).catch(() => {});
+    }
+    res.json({
+      ok: true,
+      broadcasted: true,
+      tunnelUrl: url || activeTryCloudflareUrl || null,
+      relayTopic: PROLOCO_RELAY_TOPIC
+    });
+  });
+
+  // API: Registrazione dispositivi APK per tracciamento sincronizzazione automatica
+  app.post(['/api/apk/register', '/api/v1/apk/register', '/api/v2/apk/register'], (req, res) => {
+    const payload = req.body || {};
+    const rawT = String(payload.numeroTessera || payload.tessera || '').trim().toUpperCase();
+    const devId = String(payload.deviceId || payload.id || rawT || req.ip || Math.random().toString(36).slice(2)).trim();
+    registeredApkClients.set(devId, {
+      numeroTessera: rawT,
+      versionCode: Number(payload.versionCode || 1),
+      lastSeenAt: Date.now(),
+      ip: req.ip,
+      callbackUrl: payload.callbackUrl ? String(payload.callbackUrl) : undefined
+    });
+    console.log(`[APK Registry] Registrato APK dispositivo per socio ${rawT || 'Anonimo'} (Totale registrati: ${registeredApkClients.size})`);
+    res.json({
+      ok: true,
+      registered: true,
+      tunnelUrl: activeTryCloudflareUrl || null,
+      serverTimestamp: Date.now()
+    });
+  });
+
   // API: Controllo e Gestione Versione APK (/api/version, /api/v1/version, /api/v2/version) - Sempre compatibile senza blocchi
   app.get(['/api/version', '/api/v1/version', '/api/v2/version'], (req, res) => {
     const db = readDbFromDisk() || {};
@@ -1769,7 +2024,8 @@ async function startServer() {
       downloadApkUrl: tessera ? `${hostOrigin}/apk/${encodeURIComponent(tessera)}.apk` : `${hostOrigin}/api/apk/download`,
       installPageUrl: tessera ? `${hostOrigin}/inst/${encodeURIComponent(tessera)}` : `${hostOrigin}/`,
       serverTimestamp: nowTs,
-      server_updated_at: db.server_updated_at || db.updatedAt || nowTs
+      server_updated_at: db.server_updated_at || db.updatedAt || nowTs,
+      tunnelUrl: activeTryCloudflareUrl || db.lastActiveTunnelUrl || null
     });
   });
 
@@ -1877,12 +2133,11 @@ async function startServer() {
     if (dbModified) {
       writeDbToDisk(normalizedDb);
       broadcastServerDbUpdate(normalizedDb);
-      // Propaga anche al gateway cloud se siamo in locale
+      // Propaga anche al ponte permanente Cloudflare
       const isSyncHop = Boolean(req.headers['x-proloco-sync-hop']);
       const hostHeader = String(req.get('host') || '').toLowerCase();
-      const isAlreadyPublicCloud = PUBLIC_CLOUD_PORTAL_ORIGIN.toLowerCase().includes(hostHeader) && Boolean(hostHeader);
-      if (!isSyncHop && !isAlreadyPublicCloud && typeof fetch === 'function') {
-        fetch(`${PUBLIC_CLOUD_PORTAL_ORIGIN}/api/v2/db`, {
+      if (!isSyncHop && !hostHeader.includes('prostores-email-heat-scientific') && typeof fetch === 'function') {
+        fetch(`${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/api/v2/db`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-ProLoco-Sync-Hop': '1' },
           body: JSON.stringify(normalizedDb)
@@ -1920,7 +2175,9 @@ async function startServer() {
       versionPolicy: policy,
       updateRequired,
       updateAvailable: clientVersionCode < policy.currentVersionCode,
-      downloadApkUrl: rawTessera ? `${hostOrigin}/apk/${encodeURIComponent(rawTessera)}.apk` : `${hostOrigin}/api/apk/download`,
+      downloadApkUrl: rawTessera
+        ? `${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/apk/${encodeURIComponent(rawTessera)}.apk`
+        : `${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/apk/ProLoco.apk`,
       conflictsResolved,
       socio: socioAggiornato,
       config: normalizedDb.config || null,
@@ -1969,12 +2226,11 @@ async function startServer() {
     writeDbToDisk(merged);
     broadcastServerDbUpdate(merged);
 
-    // Se la modifica proviene da un'istanza locale (senza hop di replica), propaga al gateway cloud per i soci su linea dati
+    // Se la modifica avviene localmente o su dev, propaga sempre al ponte Cloudflare permanente
     const isSyncHop = Boolean(req.headers['x-proloco-sync-hop']);
     const hostHeader = String(req.get('host') || '').toLowerCase();
-    const isAlreadyPublicCloud = PUBLIC_CLOUD_PORTAL_ORIGIN.toLowerCase().includes(hostHeader) && Boolean(hostHeader);
-    if (!isSyncHop && !isAlreadyPublicCloud && typeof fetch === 'function') {
-      fetch(`${PUBLIC_CLOUD_PORTAL_ORIGIN}/api/v2/db`, {
+    if (!isSyncHop && !hostHeader.includes('prostores-email-heat-scientific') && typeof fetch === 'function') {
+      fetch(`${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/api/v2/db`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1982,20 +2238,8 @@ async function startServer() {
         },
         body: JSON.stringify(merged)
       }).catch(() => {
-        // Ignora se il PC locale è momentaneamente offline
+        // Ignora se il server è momentaneamente offline
       });
-    }
-
-    // Se è attivo il tunnel pubblico e la richiesta proviene da localhost, propaga anche via tunnel
-    if (!isSyncHop && activeTryCloudflareUrl && !hostHeader.includes('trycloudflare.com') && typeof fetch === 'function') {
-      fetch(`${activeTryCloudflareUrl}/api/v2/db`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-ProLoco-Sync-Hop': '1'
-        },
-        body: JSON.stringify(merged)
-      }).catch(() => {});
     }
 
     res.json({
@@ -2034,9 +2278,8 @@ async function startServer() {
 
     const isSyncHop = Boolean(req.headers['x-proloco-sync-hop']);
     const hostHeader = String(req.get('host') || '').toLowerCase();
-    const isAlreadyPublicCloud = PUBLIC_CLOUD_PORTAL_ORIGIN.toLowerCase().includes(hostHeader) && Boolean(hostHeader);
-    if (!isSyncHop && !isAlreadyPublicCloud && typeof fetch === 'function') {
-      fetch(`${PUBLIC_CLOUD_PORTAL_ORIGIN}/api/db/reset`, {
+    if (!isSyncHop && !hostHeader.includes('prostores-email-heat-scientific') && typeof fetch === 'function') {
+      fetch(`${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/api/db/reset`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -2061,6 +2304,7 @@ async function startServer() {
       const isZipRequested = /\.zip$/i.test(String(rawTessera || '')) || req.query.format === 'zip';
       const cleanedParam = String(rawTessera || req.query.tessera || req.query.s || '')
         .replace(/\.(apk|zip|apk\.zip)$/i, '')
+        .replace(/^socio[_-]/i, '')
         .trim()
         .toUpperCase();
       const tessera = cleanedParam === 'APP' || cleanedParam === 'PROLOCO' ? '' : cleanedParam;
@@ -2107,8 +2351,8 @@ async function startServer() {
         .join('&');
 
       const defaultSocioUrl = tesseraUfficiale
-        ? `${hostOrigin}/?s=${encodeURIComponent(tesseraUfficiale)}&pin=${encodeURIComponent(pinSocio)}${extraSocioParams ? `&${extraSocioParams}` : ''}`
-        : `${hostOrigin}/`;
+        ? `${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/?s=${encodeURIComponent(tesseraUfficiale)}&pin=${encodeURIComponent(pinSocio)}${extraSocioParams ? `&${extraSocioParams}` : ''}`
+        : `${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/`;
       const targetUrl = String(req.query.url || defaultSocioUrl).trim();
 
       const safePkgSuffix = tesseraUfficiale.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -2180,11 +2424,16 @@ async function startServer() {
               db.lastActiveTunnelUrl,
               hostOrigin,
               ...getLocalLanIps().map(ip => `http://${ip}:${PORT}`),
+              PERMANENT_BRIDGE_TRYCLOUDFLARE_URL,
               PUBLIC_CLOUD_PORTAL_ORIGIN,
-              PUBLIC_CLOUD_PORTAL_ORIGIN.replace('://ais-pre-', '://ais-dev-')
+              PUBLIC_CLOUD_PORTAL_ORIGIN ? PUBLIC_CLOUD_PORTAL_ORIGIN.replace('://ais-pre-', '://ais-dev-') : ''
             ].filter(Boolean)
           )
         ),
+        relayTopic: PROLOCO_RELAY_TOPIC,
+        socioRelayTopic: getSocioRelayTopic(tesseraUfficiale),
+        socioRelayUrl: `https://ntfy.sh/${getSocioRelayTopic(tesseraUfficiale)}`,
+        globalRelayUrl: `https://ntfy.sh/${PROLOCO_RELAY_TOPIC}`,
         portalTargetUrl: targetUrl,
         updatedAt: Date.now()
       };
@@ -2352,7 +2601,7 @@ async function startServer() {
             Indirizzo Server Attivo (Auto-Discovery Cloud / Wi-Fi LAN / Tunnel)
           </div>
           <div style="display:flex;gap:6px;align-items:center;">
-            <input id="customServerEndpointInput" class="input" style="margin-top:0;font-size:11.5px;font-family:monospace;" type="text" placeholder="Es. http://192.168.1.10:3000 oppure URL https://...trycloudflare.com" />
+            <input id="customServerEndpointInput" class="input" style="margin-top:0;font-size:11.5px;font-family:monospace;" type="text" value="${activeTryCloudflareUrl || db.lastActiveTunnelUrl || ''}" placeholder="${activeTryCloudflareUrl || db.lastActiveTunnelUrl || 'https://...trycloudflare.com'}" />
             <button type="button" class="btn btn-secondary" style="padding:8px 10px;font-size:11px;white-space:nowrap;" onclick="saveCustomServerEndpoint()">Salva Server</button>
           </div>
           <div id="activeEndpointBadge" style="font-size:10.5px;color:#059669;font-weight:700;margin-top:5px;font-family:monospace;word-break:break-all;"></div>
@@ -2572,11 +2821,10 @@ async function startServer() {
         var cachedRaw = localStorage.getItem(STORAGE_SNAPSHOT_KEY);
         if (cachedRaw) {
           var cached = JSON.parse(cachedRaw);
-          if (cached && cached.socio) {
-            var eps = [].concat(embedded.endpoints || [], cached.endpoints || []);
+            var liveTun = '${activeTryCloudflareUrl || db.lastActiveTunnelUrl || ''}';
+            var eps = [liveTun].concat(embedded.endpoints || [], cached.endpoints || []);
             cached.endpoints = eps.filter(function(item, pos) { return item && eps.indexOf(item) === pos; });
             return cached;
-          }
         }
       } catch (e) {}
       saveState(embedded);
@@ -3027,6 +3275,17 @@ async function startServer() {
             if (res && res.ok) {
               return res.json().then(function(data) {
                 if (data && data.ok) {
+                  if (data.tunnelUrl) {
+                    var tun = cleanUrlBase(data.tunnelUrl);
+                    if (tun && tun.indexOf('.trycloudflare.com') > -1 && tun.indexOf('prostores-email-heat-scientific') === -1) {
+                      try { localStorage.setItem('proloco_last_known_tunnel_url', tun); } catch (e) {}
+                      if (!Array.isArray(appState.endpoints)) appState.endpoints = [];
+                      if (appState.endpoints.indexOf(tun) === -1) {
+                        appState.endpoints.unshift(tun);
+                        saveState(appState);
+                      }
+                    }
+                  }
                   return {
                     baseUrl: cleanBase,
                     data: data,
@@ -3047,7 +3306,18 @@ async function startServer() {
     }
 
     function expandEndpointList(endpoints) {
+      var bridgeUrl = '${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}';
+      var lastKnownTunnel = '';
+      try {
+        lastKnownTunnel = cleanUrlBase(localStorage.getItem('proloco_last_known_tunnel_url') || '');
+      } catch (e) {}
       var raw = Array.isArray(endpoints) ? endpoints.slice() : [];
+      if (lastKnownTunnel && raw.indexOf(lastKnownTunnel) === -1) {
+        raw.unshift(lastKnownTunnel);
+      }
+      if (raw.indexOf(bridgeUrl) === -1) {
+        raw.push(bridgeUrl);
+      }
       var list = [];
       for (var i = 0; i < raw.length; i++) {
         var c = cleanUrlBase(raw[i]);
@@ -3069,7 +3339,44 @@ async function startServer() {
       var list = expandEndpointList(endpoints);
       var idx = 0;
       function nextEp() {
-        if (idx >= list.length) return Promise.resolve(null);
+        if (idx >= list.length) {
+          // Se nessun endpoint noto risponde (tunnel scaduto/riavviato), interroga il Canale di Rendezvous Pubblico
+          var socioTess = normCode(appState.socio && appState.socio.numeroTessera);
+          var relayTopic = '${PROLOCO_RELAY_TOPIC}';
+          var socioTopic = socioTess ? (relayTopic + '_' + socioTess) : relayTopic;
+          return fetchWithTimeout('https://ntfy.sh/' + socioTopic + '/raw?poll=1', { cache: 'no-store' }, 2500)
+            .then(function(res) {
+              if (res && res.ok) {
+                return res.text().then(function(rawTxt) {
+                  var candidateUrl = cleanUrlBase(rawTxt);
+                  if (candidateUrl && candidateUrl.indexOf('.trycloudflare.com') > -1) {
+                    if (list.indexOf(candidateUrl) === -1) {
+                      return tryFetchEndpoint(candidateUrl);
+                    }
+                  }
+                  return null;
+                });
+              }
+              return null;
+            })
+            .catch(function() {
+              // Fallback sul topic generale Pro Loco se quello della tessera non ha risposto
+              return fetchWithTimeout('https://ntfy.sh/' + relayTopic + '/raw?poll=1', { cache: 'no-store' }, 2500)
+                .then(function(res2) {
+                  if (res2 && res2.ok) {
+                    return res2.text().then(function(rawTxt2) {
+                      var candidateUrl2 = cleanUrlBase(rawTxt2);
+                      if (candidateUrl2 && candidateUrl2.indexOf('.trycloudflare.com') > -1) {
+                        return tryFetchEndpoint(candidateUrl2);
+                      }
+                      return null;
+                    });
+                  }
+                  return null;
+                })
+                .catch(function() { return null; });
+            });
+        }
         var ep = list[idx++];
         return tryFetchEndpoint(ep).then(function(found) {
           if (found) return found;
@@ -3109,10 +3416,53 @@ async function startServer() {
 
     var activeSseSource = null;
     var activeConnectedEndpoint = '';
+    var activeRelaySseSource = null;
     var retryBackoffStepsMs = [5000, 10000, 30000];
     var currentRetryAttempt = 0;
     var retryTimerId = null;
     var isSyncInFlight = false;
+
+    // CANALE DI RICEZIONE NOTIFICHE TUNNEL PERMANENTE: ascolta il canale pubblico ntfy.sh (anche su linea 4G/5G)
+    // Non si interrompe mai anche se il PC locale riavvia il tunnel o cambia IP!
+    function connectPermanentRelayStream() {
+      if (typeof EventSource === 'undefined') return;
+      var socioTess = normCode(appState.socio && appState.socio.numeroTessera);
+      var relayTopic = '${PROLOCO_RELAY_TOPIC}';
+      var socioTopic = socioTess ? (relayTopic + '_' + socioTess) : relayTopic;
+
+      if (activeRelaySseSource) return;
+
+      try {
+        var rEs = new EventSource('https://ntfy.sh/' + socioTopic + '/sse');
+        activeRelaySseSource = rEs;
+        rEs.onmessage = function(ev) {
+          try {
+            var msg = JSON.parse(ev.data || '{}');
+            var rawMsg = String(msg.message || '').trim();
+            if (rawMsg && rawMsg.indexOf('.trycloudflare.com') > -1) {
+              var newTun = cleanUrlBase(rawMsg);
+              if (newTun) {
+                if (!Array.isArray(appState.endpoints)) appState.endpoints = [];
+                var pos = appState.endpoints.indexOf(newTun);
+                if (pos !== -1) appState.endpoints.splice(pos, 1);
+                appState.endpoints.unshift(newTun);
+                try { localStorage.setItem('proloco_last_known_tunnel_url', newTun); } catch (e) {}
+                saveState(appState);
+                var inpEp = document.getElementById('customServerEndpointInput');
+                if (inpEp) inpEp.value = newTun;
+                setSyncStatus(true, 'Nuovo Tunnel Ricevuto (Canale Tessera ' + (appState.socio ? appState.socio.numeroTessera : '') + ')');
+                syncWithServer(true);
+              }
+            }
+          } catch (e) {}
+        };
+        rEs.onerror = function() {
+          try { rEs.close(); } catch (e) {}
+          activeRelaySseSource = null;
+          setTimeout(connectPermanentRelayStream, 15000);
+        };
+      } catch (e) {}
+    }
 
     function scheduleNextSyncAttempt(wasSuccess) {
       if (retryTimerId) {
@@ -3143,14 +3493,27 @@ async function startServer() {
       }
       activeConnectedEndpoint = clean;
       try {
-        var es = new EventSource(clean + '/api/v2/stream');
+        var sseUrl = clean + '/api/v2/stream?tessera=' + encodeURIComponent(normCode(appState.socio && appState.socio.numeroTessera)) + '&v=' + APK_CLIENT_VERSION_CODE;
+        var es = new EventSource(sseUrl);
         activeSseSource = es;
         es.onmessage = function(ev) {
           try {
             var msg = JSON.parse(ev.data || '{}');
-            if (msg && msg.tunnelUrl && appState.endpoints.indexOf(msg.tunnelUrl) === -1) {
-              appState.endpoints.unshift(msg.tunnelUrl);
-              saveState(appState);
+            if (msg && msg.tunnelUrl) {
+              var newTun = cleanUrlBase(msg.tunnelUrl);
+              if (newTun && newTun.indexOf('.trycloudflare.com') > -1 && newTun.indexOf('prostores-email-heat-scientific') === -1) {
+                if (!Array.isArray(appState.endpoints)) appState.endpoints = [];
+                var exIdx = appState.endpoints.indexOf(newTun);
+                if (exIdx !== -1) appState.endpoints.splice(exIdx, 1);
+                appState.endpoints.unshift(newTun);
+                try { localStorage.setItem('proloco_last_known_tunnel_url', newTun); } catch (e) {}
+                saveState(appState);
+                if (msg.type === 'tunnel_update') {
+                  setSyncStatus(true, 'Nuovo Tunnel Ricevuto • Sincronizzazione...');
+                  syncWithServer(true);
+                  return;
+                }
+              }
             }
             if (msg && (msg.type === 'db_update' || msg.type === 'connected')) {
               syncWithServer(false);
@@ -3277,7 +3640,7 @@ async function startServer() {
         }
 
         var socioCorrente = appState.socio || {};
-        var apkDownloadUrl = activeBase + '/apk/' + encodeURIComponent(socioCorrente.numeroTessera || 'App_ProLoco') + '.apk';
+        var apkDownloadUrl = '${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/apk/' + encodeURIComponent(socioCorrente.numeroTessera || 'App_ProLoco') + '.apk';
         if (serverPayload.versionPolicy) {
           checkMandatoryApkVersion(serverPayload.versionPolicy, apkDownloadUrl);
         } else if (serverPayload.db && serverPayload.db.apkVersionPolicy) {
@@ -3397,6 +3760,7 @@ async function startServer() {
       hydrateFromRoomDB();
       checkPinGate();
       renderUI();
+      connectPermanentRelayStream();
       var inpEp = document.getElementById('customServerEndpointInput');
       if (inpEp && Array.isArray(appState.endpoints) && appState.endpoints.length > 0) {
         inpEp.value = appState.endpoints[0];
@@ -3523,20 +3887,30 @@ ${targetUrl}
     serveApkPackage(req, res, req.params.tesseraFile);
   });
 
-  // API Download APK standard: /api/apk/download, /api/v1/apk/download, /api/v2/apk/download
-  app.get(['/api/apk/download', '/api/v1/apk/download', '/api/v2/apk/download'], (req, res) => {
-    serveApkPackage(req, res);
-  });
+  // API Download APK standard: /api/apk/download, /api/v1/apk/download, /api/v2/apk/download, /apk, /download-apk, /app.apk, /ProLoco.apk
+  app.get(
+    [
+      '/api/apk/download',
+      '/api/v1/apk/download',
+      '/api/v2/apk/download',
+      '/apk',
+      '/download-apk',
+      '/app.apk',
+      '/ProLoco.apk'
+    ],
+    (req, res) => {
+      serveApkPackage(req, res);
+    }
+  );
 
   // Pagina Mobile Guidata di Installazione Android (ideale per link da WhatsApp e Email)
-  app.get('/inst/:tessera', async (req, res) => {
-    if (!activeTryCloudflareUrl) {
-      await startCloudflareQuickTunnel(PORT).catch(() => {});
-    }
+  app.get(['/inst', '/inst/:tessera'], async (req, res) => {
     const db = readDbFromDisk() || {};
-    const rawT = String(req.params.tessera || '').replace(/\.(apk|zip)$/i, '').trim().toUpperCase();
+    const rawT = req.params.tessera
+      ? String(req.params.tessera).replace(/\.(apk|zip)$/i, '').replace(/^socio[_-]/i, '').trim().toUpperCase()
+      : '';
     const normT = rawT.replace(/[^a-zA-Z0-9]/g, '');
-    const socioDb = Array.isArray(db.soci)
+    const socioDb = normT && Array.isArray(db.soci)
       ? db.soci.find((s: any) => String(s.numeroTessera || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase() === normT)
       : null;
 
@@ -3548,7 +3922,7 @@ ${targetUrl}
     const nomeSocio =
       nomeCompletoParam ||
       (socioDb ? `${socioDb.nome || ''} ${socioDb.cognome || ''}`.trim() : '') ||
-      `Socio ${tessera}`;
+      (tessera ? `Socio ${tessera}` : 'Socio Pro Loco');
     const pinSocio = String(req.query.p || req.query.pin || (socioDb && socioDb.pin) || '1234').trim();
     const nomeProLoco = String((db.config && db.config.nome) || 'Pro Loco').trim();
     const pinToken = toBase64UrlNode(pinSocio);
@@ -3561,16 +3935,24 @@ ${targetUrl}
       .filter(Boolean)
       .join('&');
 
-    const apkUrl = `/apk/${encodeURIComponent(tessera)}.apk?${extraQuery}`;
-    const zipUrl = `/apk/${encodeURIComponent(tessera)}.zip?${extraQuery}`;
-    const portalUrl = `/?s=${encodeURIComponent(tessera)}&pin=${encodeURIComponent(pinSocio)}&${extraQuery}`;
+    const apkUrl = tessera
+      ? `/apk/${encodeURIComponent(tessera)}.apk?${extraQuery}`
+      : `/api/apk/download?${extraQuery}`;
+    const zipUrl = tessera
+      ? `/apk/${encodeURIComponent(tessera)}.zip?${extraQuery}`
+      : `/api/apk/download?format=zip&${extraQuery}`;
+    const portalUrl = tessera
+      ? `/?s=${encodeURIComponent(tessera)}&pin=${encodeURIComponent(pinSocio)}&${extraQuery}`
+      : `/?portale=soci`;
+    const bridgeApkUrl = `${PERMANENT_BRIDGE_TRYCLOUDFLARE_URL}/apk/${encodeURIComponent(tessera || 'ProLoco')}.apk?${extraQuery}`;
+    const targetApkName = tessera ? `Socio_${tessera.replace(/[^a-zA-Z0-9_]/g, '_')}.apk` : 'App_ProLoco.apk';
 
     const html = `<!DOCTYPE html>
 <html lang="it">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Installazione App ${nomeProLoco} - Tessera ${tessera}</title>
+  <title>Installazione App ${nomeProLoco}${tessera ? ` - Tessera ${tessera}` : ''}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
     body { background: #f1f5f9; color: #0f172a; padding: 16px; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
@@ -3582,17 +3964,23 @@ ${targetUrl}
     .socio-card div { margin-bottom: 4px; }
     .btn-apk { display: block; width: 100%; background: #2563eb; color: #ffffff; text-align: center; text-decoration: none; font-weight: 800; font-size: 15px; padding: 14px; border-radius: 14px; margin-bottom: 8px; box-shadow: 0 4px 12px rgba(37,99,235,0.25); }
     .btn-zip { display: block; width: 100%; background: #475569; color: #ffffff; text-align: center; text-decoration: none; font-weight: 700; font-size: 13px; padding: 11px; border-radius: 12px; margin-bottom: 8px; }
-    .btn-web { display: block; width: 100%; background: #059669; color: #ffffff; text-align: center; text-decoration: none; font-weight: 800; font-size: 14px; padding: 13px; border-radius: 14px; margin-bottom: 18px; }
+    .btn-web { display: block; width: 100%; background: #059669; color: #ffffff; text-align: center; text-decoration: none; font-weight: 800; font-size: 14px; padding: 13px; border-radius: 14px; margin-bottom: 14px; }
     .steps { background: #fffbeb; border: 1px solid #fde68a; border-radius: 14px; padding: 14px; font-size: 12px; color: #78350f; line-height: 1.5; }
     .steps h3 { font-size: 12px; font-weight: 800; text-transform: uppercase; margin-bottom: 6px; color: #92400e; }
     .steps ol { padding-left: 18px; }
     .steps li { margin-bottom: 6px; }
+    .bridge-box { margin-top: 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 12px; text-align: center; font-size: 11px; color: #64748b; line-height: 1.4; }
   </style>
   <script>
     window.addEventListener('load', function() {
       setTimeout(function() {
-        window.location.href = ${JSON.stringify(apkUrl)};
-      }, 400);
+        var a = document.createElement('a');
+        a.href = ${JSON.stringify(apkUrl)};
+        a.download = ${JSON.stringify(targetApkName)};
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }, 500);
     });
   </script>
 </head>
@@ -3609,7 +3997,7 @@ ${targetUrl}
 
     <div class="socio-card">
       <div><strong>Destinatario:</strong> ${nomeSocio}</div>
-      <div><strong>Numero Tessera:</strong> ${tessera}</div>
+      ${tessera ? `<div><strong>Numero Tessera:</strong> ${tessera}</div>` : ''}
       <div><strong>PIN di Accesso:</strong> ${pinSocio}</div>
     </div>
 
@@ -3620,10 +4008,17 @@ ${targetUrl}
     <div class="steps">
       <h3>Procedura di installazione sicura su Android:</h3>
       <ol>
-        <li>Al termine del download tocca <strong>Apri</strong> sul file <strong>Socio_${tessera.replace(/[^a-zA-Z0-9_]/g, '_')}.apk</strong>.</li>
+        <li>Al termine del download tocca <strong>Apri</strong> sul file <strong>${targetApkName}</strong>.</li>
         <li>Se il telefono mostra <em>"Installazione bloccata da questa fonte"</em>, tocca <strong>Impostazioni</strong>, attiva <strong>"Consenti da questa fonte"</strong> e torna indietro toccando <strong>Installa</strong>.</li>
         <li>Se Google Play Protect mostra l'avviso di protezione per app fuori dallo Store, tocca <strong>"Più dettagli"</strong> e seleziona <strong>"Installa comunque"</strong>.</li>
       </ol>
+    </div>
+
+    <div class="bridge-box">
+      <strong>Ponte Permanente Cloudflare configurato:</strong><br/>
+      <a href="${bridgeApkUrl}" style="color:#2563eb;font-weight:700;word-break:break-all;text-decoration:underline;">
+        ${bridgeApkUrl}
+      </a>
     </div>
   </div>
 </body>
@@ -3659,10 +4054,7 @@ ${targetUrl}
   });
 
   const distPath = path.join(__dirname, 'dist');
-  const hasBuiltDist = fs.existsSync(path.join(distPath, 'index.html'));
-  const isProduction =
-    process.env.NODE_ENV === 'production' ||
-    (process.env.NODE_ENV !== 'development' && hasBuiltDist);
+  const isProduction = process.env.NODE_ENV === 'production';
 
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
@@ -3689,6 +4081,7 @@ ${targetUrl}
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server Pro Loco avviato su http://0.0.0.0:${PORT} (${isProduction ? 'production' : 'development'})`);
     startCloudflareQuickTunnel(PORT).catch(() => {});
+    startInternetAndTunnelWatcher(PORT);
   });
 }
 

@@ -286,9 +286,6 @@ export const MemberList: React.FC<MemberListProps> = ({
             </div>
             <span className="text-[10px] font-bold text-indigo-800 mt-2 inline-flex items-center gap-1.5">
               <span>Stampa Libro Soci Ufficiale A4 →</span>
-              <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-900 font-mono text-[9.5px] font-extrabold border border-indigo-200">
-                v{GESTIONALE_VERSION}
-              </span>
             </span>
           </div>
         </div>
@@ -432,12 +429,6 @@ export const MemberList: React.FC<MemberListProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             {onStampaLibroSoci && (
               <div className="inline-flex items-center gap-1.5">
-                <span
-                  className="px-2 py-1.5 rounded-lg text-[11px] font-mono font-extrabold text-emerald-900 bg-emerald-100/80 border border-emerald-300 select-none"
-                  title="Versione aggiornamento del Gestionale"
-                >
-                  v{GESTIONALE_VERSION}
-                </span>
                 <button
                   id="btn-stampa-libro-soci-memberlist"
                   onClick={onStampaLibroSoci}

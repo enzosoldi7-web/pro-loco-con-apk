@@ -111,7 +111,42 @@ export interface ElementoCestino {
   oraEliminazione?: string; // Ora HH:MM
   motivo: string; // Motivazione del ripensamento o eliminazione
   eliminatoDa?: string; // Es. "Ufficio Tesoreria / Presidente"
-  datiOriginali: any; // Record originale serializzato per consentire consultazione o ripristino
+  datiOriginali?: any; // Snapshot completo dell'entità per il ripristino sicuro
+}
+
+export type TipoMovimentoContabile = 'entrata' | 'uscita';
+
+export type CategoriaMovimentoContabile =
+  | 'quote_associative'
+  | 'donazioni_liberalita'
+  | 'contributi_pubblici'
+  | 'sponsor_partner'
+  | 'proventi_eventi'
+  | 'altre_entrate'
+  | 'spese_eventi'
+  | 'materiali_attrezzature'
+  | 'affitti_locali'
+  | 'utenze_sede'
+  | 'assicurazioni'
+  | 'cancelleria_tipografia'
+  | 'servizi_consulenze'
+  | 'rimborsi_volontari'
+  | 'altre_uscite';
+
+export interface MovimentoContabile {
+  id: string;
+  data: string; // YYYY-MM-DD
+  tipo: TipoMovimentoContabile;
+  descrizione: string;
+  importo: number;
+  categoria: CategoriaMovimentoContabile | string;
+  metodoPagamento?: string; // 'Contanti' | 'Bonifico Bancario' | 'POS / Carta' | 'Altro'
+  note?: string;
+  riferimentoId?: string;
+  anno: number;
+  allegatoNome?: string;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface QuotaAssociativa {

@@ -815,12 +815,6 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
             </div>
 
             <div className="flex items-center gap-2">
-              <div
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-mono font-extrabold text-emerald-950 bg-emerald-100/90 border border-emerald-300 rounded-xl select-none"
-                title="Versione aggiornamento applicazione"
-              >
-                <span>v2.0.0</span>
-              </div>
               <div className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-xl select-none">
                 <Lock className="w-3.5 h-3.5 text-emerald-700" />
                 <span>Area Riservata Soci</span>
@@ -1027,12 +1021,6 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                   : 'Server Spento • Consultabile Offline'}
               </span>
             </button>
-            <div
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-mono font-extrabold text-emerald-950 bg-emerald-100/90 border border-emerald-300 rounded-xl select-none"
-              title="Versione aggiornamento applicazione"
-            >
-              <span>v2.0.0</span>
-            </div>
             <div
               className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-xl select-none"
               title="Accesso personale protetto tramite Tessera e PIN"
@@ -1671,14 +1659,14 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                                 Edizione #{ed.numeroEdizione} • {ed.anno}
                               </span>
                               <span className="text-[10.5px] font-semibold text-stone-500">
-                                {ed.mesePeriodo}
+                                {ed.periodo || ed.dataPubblicazione || ed.dataUscita}
                               </span>
                             </div>
                             <h4 className="text-sm font-extrabold text-stone-900">
-                              {ed.titoloTestata}
+                              {ed.testata || (ed as any).titoloTestata || 'La Voce della Pro Loco'}
                             </h4>
                             <p className="text-[11px] text-stone-500 line-clamp-1">
-                              {ed.sottotitoloTestata} • {ed.articoli?.length || 0} articoli
+                              {ed.sottotitoloTestata || ''} • {ed.articoli?.length || 0} articoli
                             </p>
                           </div>
                           <button

@@ -12,7 +12,9 @@ import {
   saveComunicazioniSoci,
   syncDatabaseToServer,
   getPublicPortalOrigin,
-  getActiveTryCloudflareUrl
+  getActiveTryCloudflareUrl,
+  fetchActiveTunnelUrl,
+  PERMANENT_BRIDGE_URL
 } from '../storage';
 import {
   Mail,
@@ -275,6 +277,17 @@ export const ComunicazioniNewsletterView: React.FC<ComunicazioniNewsletterViewPr
   const [copiatoEmailList, setCopiatoEmailList] = useState<boolean>(false);
   const [copiatoTesto, setCopiatoTesto] = useState<boolean>(false);
   const [inviatiIndividualiIds, setInviatiIndividualiIds] = useState<string[]>([]);
+  const [tunnelUrl, setTunnelUrl] = useState<string | null>(() => getActiveTryCloudflareUrl());
+
+  useEffect(() => {
+    let mounted = true;
+    fetchActiveTunnelUrl(false).then(url => {
+      if (mounted && url) setTunnelUrl(url);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     const syncStorico = () => {
@@ -392,7 +405,7 @@ export const ComunicazioniNewsletterView: React.FC<ComunicazioniNewsletterViewPr
 
   // Sostituzione variabili dinamiche per un singolo socio o in modalità cumulativa
   const compilaTestoPerSocio = (templateStr: string, socioTarget?: Socio | null, modalitaCumulativa: boolean = false): string => {
-    const publicOrigin = getActiveTryCloudflareUrl() || getPublicPortalOrigin();
+    const publicOrigin = (tunnelUrl && tunnelUrl.includes('.trycloudflare.com')) ? tunnelUrl : getPublicPortalOrigin();
     const s = socioTarget;
     const statoQuotaRaw = s ? getStatoQuotaSocio(s, annoSelezionato) : 'in_regola';
     const statoQuotaLabel =
@@ -436,11 +449,21 @@ export const ComunicazioniNewsletterView: React.FC<ComunicazioniNewsletterViewPr
       .replace(/\{LINK_PORTALE_SOCIO\}/g, linkPortale);
 
     if (includiLinkApkNelMessaggio) {
-      const linkApk =
+      const slug = tesseraClean.replace(/[^a-zA-Z0-9_]/g, '_');
+      const nomeApk = s && !modalitaCumulativa ? `Socio_${slug}.apk` : 'App_ProLoco.apk';
+      const linkDownloadDiretto =
+        s && !modalitaCumulativa
+          ? `${publicOrigin}/apk/${encodeURIComponent(tesseraClean)}.apk?p=${encodeURIComponent(pinSocio)}`
+          : `${publicOrigin}/api/apk/download`;
+      const linkInst =
         s && !modalitaCumulativa
           ? `${publicOrigin}/inst/${encodeURIComponent(tesseraClean)}?p=${encodeURIComponent(pinSocio)}`
-          : `${publicOrigin}/api/apk/download`;
-      compilato += `\n\n📱 Scarica l'App Android (.APK) Ufficiale del Socio:\n${linkApk}`;
+          : `${publicOrigin}/inst`;
+
+      compilato += `\n\n📱 Scarica l'App Android Ufficiale (${nomeApk}):\n• Download Diretto (.APK):\n${linkDownloadDiretto}\n• Pagina di Installazione Guidata:\n${linkInst}`;
+      if (publicOrigin !== PERMANENT_BRIDGE_URL) {
+        compilato += `\n• Ponte Permanente Cloudflare:\n${PERMANENT_BRIDGE_URL}/apk/${encodeURIComponent(tesseraClean)}.apk`;
+      }
     }
 
     return compilato.replace(/  +/g, ' ').trim();

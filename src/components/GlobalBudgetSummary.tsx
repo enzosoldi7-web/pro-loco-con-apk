@@ -89,6 +89,7 @@ import {
 import { PromemoriaRinnovoModal } from './PromemoriaRinnovoModal';
 import { DonazioneModal } from './DonazioneModal';
 import { DonazioneRicevutaModal } from './DonazioneRicevutaModal';
+import { MovimentiContabiliView } from './MovimentiContabiliView';
 
 interface GlobalBudgetSummaryProps {
   soci: Socio[];
@@ -119,7 +120,7 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
   onVaiAEvento,
   onRegistraPagamento
 }) => {
-  const [sottoTab, setSottoTab] = useState<'quadro' | 'tesseramenti' | 'eventi' | 'donazioni' | 'runts' | 'database'>('quadro');
+  const [sottoTab, setSottoTab] = useState<'contabilita' | 'quadro' | 'tesseramenti' | 'eventi' | 'donazioni' | 'runts' | 'database'>('contabilita');
   const [ricercaTesto, setRicercaTesto] = useState<string>('');
   const [filtroAnno, setFiltroAnno] = useState<number | 'tutti'>(annoSelezionato);
   const [mostraModalPromemoria, setMostraModalPromemoria] = useState<boolean>(false);
@@ -1173,6 +1174,18 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
       {/* 3. SUB-NAVIGAZIONE SCHEDE BILANCIO */}
       <div className="bg-white rounded-xl border border-slate-200 p-1.5 shadow-2xs flex flex-wrap items-center gap-1.5">
         <button
+          onClick={() => setSottoTab('contabilita')}
+          className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5 ${
+            sottoTab === 'contabilita' 
+              ? 'bg-emerald-800 text-white shadow-xs' 
+              : 'text-slate-600 hover:bg-slate-100 font-semibold'
+          }`}
+        >
+          <Receipt className="w-4 h-4 text-emerald-400" />
+          <span>Gestione Contabile (Prima Nota)</span>
+        </button>
+
+        <button
           onClick={() => setSottoTab('quadro')}
           className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5 ${
             sottoTab === 'quadro' 
@@ -1246,6 +1259,17 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
       </div>
 
       {/* 4. CONTENUTO SPECIFICO DEL SOTTO-TAB */}
+
+      {/* SOTTO-TAB: GESTIONE CONTABILE SEMPLIFICATA (PRIMA NOTA ENTRATE & USCITE) */}
+      {sottoTab === 'contabilita' && (
+        <MovimentiContabiliView
+          annoSelezionato={annoSelezionato}
+          config={config}
+          soci={soci}
+          eventi={eventi}
+          donazioni={donazioni}
+        />
+      )}
 
       {/* SOTTO-TAB 1: QUADRO FINANZIARIO & GRAFICI INTERATTIVI */}
       {sottoTab === 'quadro' && (

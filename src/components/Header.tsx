@@ -30,7 +30,15 @@ import {
   Maximize2,
   Minimize2,
   KeyRound,
-  Mail
+  Mail,
+  Server,
+  Wifi,
+  Copy,
+  ExternalLink,
+  Check,
+  Radio,
+  Send,
+  Activity
 } from 'lucide-react';
 import {
   esportaLibroSociCSV,
@@ -43,8 +51,12 @@ import {
   ServerSyncStatusInfo,
   fetchDatabaseFromServer,
   syncDatabaseToServer,
-  hasPendingServerSync
+  hasPendingServerSync,
+  getActiveTryCloudflareUrl,
+  setActiveTryCloudflareUrl,
+  fetchActiveTunnelUrl
 } from '../storage';
+import { ServerOfficeMenu } from './ServerOfficeMenu';
 
 interface HeaderProps {
   config: ProLocoInfo;
@@ -108,6 +120,110 @@ export const Header: React.FC<HeaderProps> = ({
   const [annoDaConfermare, setAnnoDaConfermare] = useState<number | null>(null);
   const [messaggioNotifica, setMessaggioNotifica] = useState<string | null>(null);
   const [syncInfo, setSyncInfo] = useState<ServerSyncStatusInfo>(() => getServerSyncStatus());
+  const [mostraMenuServer, setMostraMenuServer] = useState(false);
+  const [tunnelAttivo, setTunnelAttivo] = useState<string>(() => getActiveTryCloudflareUrl());
+  const [customTunnelInput, setCustomTunnelInput] = useState<string>('');
+  const [isCaricamentoTunnel, setIsCaricamentoTunnel] = useState(false);
+  const [feedbackCopiato, setFeedbackCopiato] = useState(false);
+  const [notificaServerAzione, setNotificaServerAzione] = useState<{ tipo: 'success' | 'info' | 'error'; testo: string } | null>(null);
+  const [pingStatus, setPingStatus] = useState<{ ms?: number; ok?: boolean; inCorso?: boolean } | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    fetchActiveTunnelUrl(false).then(url => {
+      if (mounted && url) {
+        setTunnelAttivo(url);
+        setCustomTunnelInput(prev => prev || url);
+      }
+    });
+
+    const handleTunnelUpdate = (e: Event) => {
+      const customEv = e as CustomEvent<{ url?: string }>;
+      const newUrl = customEv.detail?.url || getActiveTryCloudflareUrl();
+      if (mounted && newUrl) {
+        setTunnelAttivo(newUrl);
+        setCustomTunnelInput(prev => prev || newUrl);
+      }
+    };
+
+    window.addEventListener('proloco-tunnel-updated', handleTunnelUpdate);
+    return () => {
+      mounted = false;
+      window.removeEventListener('proloco-tunnel-updated', handleTunnelUpdate);
+    };
+  }, []);
+
+  const handleRiavviaTunnel = async () => {
+    setIsCaricamentoTunnel(true);
+    setNotificaServerAzione({ tipo: 'info', testo: 'Generazione nuovo tunnel Cloudflare in corso... attendi qualche istante.' });
+    try {
+      const nuovoUrl = await fetchActiveTunnelUrl(true);
+      if (nuovoUrl) {
+        setTunnelAttivo(nuovoUrl);
+        setCustomTunnelInput(nuovoUrl);
+        setNotificaServerAzione({ tipo: 'success', testo: `Nuovo tunnel generato (${nuovoUrl}) e trasmesso con successo a tutti gli APK!` });
+      } else {
+        setNotificaServerAzione({ tipo: 'error', testo: 'Impossibile rigenerare il tunnel. Verifica la connessione a Internet del server.' });
+      }
+    } catch {
+      setNotificaServerAzione({ tipo: 'error', testo: 'Errore di comunicazione con il backend.' });
+    } finally {
+      setIsCaricamentoTunnel(false);
+      setTimeout(() => setNotificaServerAzione(null), 6000);
+    }
+  };
+
+  const handleSalvaEInviaTunnelCustom = async () => {
+    const urlPulito = customTunnelInput.trim().replace(/\/+$/, '');
+    if (!urlPulito) {
+      setNotificaServerAzione({ tipo: 'error', testo: 'Inserisci un indirizzo URL valido (es. https://tuodominio.trycloudflare.com)' });
+      return;
+    }
+    setIsCaricamentoTunnel(true);
+    try {
+      const res = await fetch('/api/tunnel/announce', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tunnelUrl: urlPulito, forceSync: true })
+      });
+      if (res.ok) {
+        setActiveTryCloudflareUrl(urlPulito);
+        setTunnelAttivo(urlPulito);
+        setNotificaServerAzione({ tipo: 'success', testo: 'Indirizzo tunnel memorizzato e inviato immediatamente a tutti gli APK cellulari!' });
+      } else {
+        setNotificaServerAzione({ tipo: 'error', testo: 'Il server ha restituito un codice di errore durante l\'annuncio del tunnel.' });
+      }
+    } catch {
+      setNotificaServerAzione({ tipo: 'error', testo: 'Errore di rete durante la trasmissione dell\'indirizzo al server.' });
+    } finally {
+      setIsCaricamentoTunnel(false);
+      setTimeout(() => setNotificaServerAzione(null), 6000);
+    }
+  };
+
+  const handleTestPing = async () => {
+    setPingStatus({ inCorso: true });
+    const t0 = performance.now();
+    try {
+      const res = await fetch('/api/v2/version', { cache: 'no-store' });
+      const ms = Math.round(performance.now() - t0);
+      if (res.ok) {
+        setPingStatus({ ok: true, ms });
+      } else {
+        setPingStatus({ ok: false, ms });
+      }
+    } catch {
+      setPingStatus({ ok: false });
+    }
+  };
+
+  const handleCopiaTunnel = () => {
+    if (!tunnelAttivo) return;
+    navigator.clipboard.writeText(tunnelAttivo).then(() => {
+      setFeedbackCopiato(true);
+      setTimeout(() => setFeedbackCopiato(false), 2000);
+    });
+  };
 
   useEffect(() => {
     const updateStatus = () => {
@@ -190,65 +306,6 @@ export const Header: React.FC<HeaderProps> = ({
                   <Award className="w-3 h-3 text-emerald-600" />
                   {config.codiceUnpli ? 'UNPLI' : 'APS Pro Loco'}
                 </span>
-                <span
-                  className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-extrabold font-mono bg-emerald-800 text-white border border-emerald-700 shadow-2xs"
-                  title="Versione Gestionale (compatibile bidirezionalmente con tutte le versioni APK)"
-                >
-                  v{GESTIONALE_VERSION}
-                </span>
-                {/* Indicatore di Stato Visivo Connessione & Sincronizzazione Server (Verde / Giallo / Rosso) */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (hasPendingServerSync()) {
-                      syncDatabaseToServer();
-                    } else {
-                      fetchDatabaseFromServer();
-                    }
-                  }}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold border transition-all cursor-pointer select-none ${
-                    syncInfo.status === 'synced'
-                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
-                      : syncInfo.status === 'syncing'
-                      ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
-                      : 'bg-red-50 text-red-800 border-red-200 hover:bg-red-100'
-                  }`}
-                  title={
-                    syncInfo.status === 'synced'
-                      ? `Connesso al server e sincronizzato${syncInfo.lastSyncAt ? ` (ultimo allineamento: ${new Date(syncInfo.lastSyncAt).toLocaleTimeString('it-IT')})` : ''}. Clicca per verificare ora.`
-                      : syncInfo.status === 'syncing'
-                      ? 'Sincronizzazione bidirezionale col server in corso... Clicca per forzare il riallineamento.'
-                      : 'Offline / Server non raggiungibile: le modifiche vengono salvate in locale e sincronizzate automaticamente appena il server torna online.'
-                  }
-                >
-                  <span className="relative flex h-2.5 w-2.5">
-                    <span
-                      className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                        syncInfo.status === 'synced'
-                          ? 'bg-emerald-400'
-                          : syncInfo.status === 'syncing'
-                          ? 'bg-amber-400'
-                          : 'bg-red-400'
-                      }`}
-                    />
-                    <span
-                      className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                        syncInfo.status === 'synced'
-                          ? 'bg-emerald-500'
-                          : syncInfo.status === 'syncing'
-                          ? 'bg-amber-500'
-                          : 'bg-red-500'
-                      }`}
-                    />
-                  </span>
-                  <span>
-                    {syncInfo.status === 'synced'
-                      ? 'Sincronizzato'
-                      : syncInfo.status === 'syncing'
-                      ? 'Sincronizzazione...'
-                      : 'Offline'}
-                  </span>
-                </button>
               </div>
               <p className="text-xs text-slate-500 flex items-center gap-2 mt-0.5">
                 <span>C.F. {config.codiceFiscale}</span>
@@ -420,9 +477,6 @@ export const Header: React.FC<HeaderProps> = ({
                         <Printer className="w-4 h-4 text-emerald-600" />
                         <span>Stampa Libro dei Soci (A4)</span>
                       </span>
-                      <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 font-mono text-[10px] font-bold">
-                        v{GESTIONALE_VERSION}
-                      </span>
                     </button>
                   )}
                   {onApriStampaProgrammaEventi && (
@@ -514,10 +568,14 @@ export const Header: React.FC<HeaderProps> = ({
               id="btn-impostazioni-proloco"
               onClick={onApriImpostazioni}
               title="Configurazione Associazione e Quote"
-              className="p-1.5 text-slate-600 hover:text-slate-900 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition-all duration-150 shadow-2xs cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 hover:text-slate-900 transition-all duration-150 shadow-2xs cursor-pointer"
             >
-              <Settings className="w-4 h-4" />
+              <Settings className="w-3.5 h-3.5 text-slate-600" />
+              <span>Configurazione</span>
             </button>
+
+            {/* Menu a Scomparsa Stile Office: Server & Tunnel */}
+            <ServerOfficeMenu />
 
             {/* Azioni di Stampa Rapida A4 per ogni Sezione Attiva */}
             {tabAttivo === 'soci' && onApriStampaLibroSoci && (
