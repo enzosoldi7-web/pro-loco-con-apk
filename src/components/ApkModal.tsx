@@ -55,7 +55,14 @@ export const ApkModal: React.FC<ApkModalProps> = ({
       if (mounted && url) setTunnelUrl(url);
     });
     fetch('/api/v2/version')
-      .then(r => (r.ok ? r.json() : null))
+      .then(async r => {
+        if (!r || !r.ok) return null;
+        const ct = (r.headers.get('content-type') || '').toLowerCase();
+        if (!ct.includes('application/json')) return null;
+        const text = (await r.text() || '').trim();
+        if (!text || (!text.startsWith('{') && !text.startsWith('['))) return null;
+        return JSON.parse(text);
+      })
       .then(data => {
         if (mounted && data && data.versionPolicy) {
           setVersionPolicy(data.versionPolicy);

@@ -3947,13 +3947,19 @@ export async function fetchActiveTunnelUrl(forceRestart: boolean = false): Promi
       method: forceRestart ? 'POST' : 'GET',
       cache: 'no-store'
     });
-    if (res.ok) {
-      const data = await res.json();
-      const candidate = (data && (data.tunnelUrl || data.publicOrigin)) as string | undefined;
-      if (candidate && typeof candidate === 'string' && candidate.includes('.trycloudflare.com') && !candidate.includes('prostores-email-heat-scientific')) {
-        const clean = candidate.trim().replace(/\/+$/, '');
-        setActiveTryCloudflareUrl(clean);
-        return clean;
+    if (res && res.ok) {
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('application/json')) {
+        const raw = (await res.text() || '').trim();
+        if (raw && (raw.startsWith('{') || raw.startsWith('['))) {
+          const data = JSON.parse(raw);
+          const candidate = (data && (data.tunnelUrl || data.publicOrigin)) as string | undefined;
+          if (candidate && typeof candidate === 'string' && candidate.includes('.trycloudflare.com') && !candidate.includes('prostores-email-heat-scientific')) {
+            const clean = candidate.trim().replace(/\/+$/, '');
+            setActiveTryCloudflareUrl(clean);
+            return clean;
+          }
+        }
       }
     }
   } catch {
@@ -4641,12 +4647,16 @@ export function syncDatabaseToServer(partial?: Record<string, unknown>): void {
           isServerCurrentlyReachable = true;
           setPendingServerSync(false);
           try {
-            const data = await res.json();
-            if (data && (data.server_updated_at || data.updatedAt)) {
-              setLastSyncServerTimestamp(Number(data.server_updated_at || data.updatedAt));
-            }
-            if (data && typeof data.tunnelUrl === 'string' && data.tunnelUrl.includes('.trycloudflare.com')) {
-              setActiveTryCloudflareUrl(data.tunnelUrl);
+            const rawText = await res.text();
+            const trimmed = (rawText || '').trim();
+            if (trimmed && !trimmed.startsWith('<')) {
+              const data = JSON.parse(trimmed);
+              if (data && (data.server_updated_at || data.updatedAt)) {
+                setLastSyncServerTimestamp(Number(data.server_updated_at || data.updatedAt));
+              }
+              if (data && typeof data.tunnelUrl === 'string' && data.tunnelUrl.includes('.trycloudflare.com')) {
+                setActiveTryCloudflareUrl(data.tunnelUrl);
+              }
             }
           } catch (jsonErr) {
             console.warn('[syncDatabaseToServer] Impossibile leggere la risposta JSON da /api/v2/db:', jsonErr);
@@ -4759,12 +4769,18 @@ export async function fetchDatabaseFromServer(): Promise<ServerDatabaseSnapshot 
       hostname.startsWith('192.168.') ||
       hostname.startsWith('10.');
 
+    const isJsonResponse = (r: Response | null): boolean => {
+      if (!r || !r.ok) return false;
+      const ct = (r.headers.get('content-type') || '').toLowerCase();
+      return ct.includes('application/json');
+    };
+
     let res: Response | null = null;
     try {
       res = await fetch(`/api/v2/db${sinceQuery}`, { cache: 'no-store' });
-      if (!res || !res.ok) {
+      if (!isJsonResponse(res)) {
         console.warn(
-          `[fetchDatabaseFromServer] Endpoint /api/v2/db non disponibile (status: ${res?.status}), tentativo fallback su /api/db...`
+          `[fetchDatabaseFromServer] Endpoint /api/v2/db non JSON o non disponibile (status: ${res?.status}, type: ${res?.headers.get('content-type')}), tentativo fallback su /api/db...`
         );
         res = await fetch(`/api/db${sinceQuery}`, { cache: 'no-store' });
       }
@@ -4775,30 +4791,34 @@ export async function fetchDatabaseFromServer(): Promise<ServerDatabaseSnapshot 
 
     // Se NON siamo sul PC locale (es. siamo su smartphone/APK), prova anche il tunnel cloud attivo
     // Sul PC locale (localhost) non sovrascriviamo mai il database locale con un database remoto diverso
-    if (!isLocalHost) {
+    if (!isLocalHost && !isJsonResponse(res)) {
       const savedTunnel = getActiveTryCloudflareUrl();
-      if ((!res || !res.ok) && savedTunnel && window.location.origin !== savedTunnel) {
+      if (savedTunnel && window.location.origin !== savedTunnel) {
         try {
-          res = await fetch(`${savedTunnel}/api/v2/db${sinceQuery}`, { cache: 'no-store', mode: 'cors' });
-          if (!res || !res.ok) {
+          const tRes = await fetch(`${savedTunnel}/api/v2/db${sinceQuery}`, { cache: 'no-store', mode: 'cors' });
+          if (isJsonResponse(tRes)) {
+            res = tRes;
+          } else {
             console.warn(
-              `[fetchDatabaseFromServer] Tunnel ${savedTunnel}/api/v2/db non disponibile (status: ${res?.status}), tentativo fallback su /api/db...`
+              `[fetchDatabaseFromServer] Tunnel ${savedTunnel}/api/v2/db non JSON (status: ${tRes?.status}), tentativo fallback su /api/db...`
             );
-            res = await fetch(`${savedTunnel}/api/db${sinceQuery}`, { cache: 'no-store', mode: 'cors' });
+            const tResFallback = await fetch(`${savedTunnel}/api/db${sinceQuery}`, { cache: 'no-store', mode: 'cors' });
+            if (isJsonResponse(tResFallback)) {
+              res = tResFallback;
+            }
           }
         } catch (err) {
           console.error(`[fetchDatabaseFromServer] Errore di rete contattando il tunnel (${savedTunnel}):`, err);
-          res = null;
         }
       }
     }
 
-    if (!res || !res.ok) {
+    if (!isJsonResponse(res)) {
       isServerCurrentlyReachable = false;
       isSyncingWithServer = false;
       emitNetworkStatusEvent();
-      console.error(
-        `[fetchDatabaseFromServer] Sincronizzazione bloccata: nessun endpoint backend raggiungibile (ultimo status HTTP: ${res?.status ?? 'nessuna risposta'}).`
+      console.warn(
+        `[fetchDatabaseFromServer] Sincronizzazione in attesa: nessun endpoint JSON valido raggiungibile (ultimo status HTTP: ${res?.status ?? 'nessuna risposta'}, type: ${res?.headers.get('content-type') || 'vuoto'}).`
       );
       return null;
     }
@@ -4820,7 +4840,24 @@ export async function fetchDatabaseFromServer(): Promise<ServerDatabaseSnapshot 
     isSyncingWithServer = false;
     emitNetworkStatusEvent();
 
-    const data = await res.json();
+    let data: any = null;
+    try {
+      const rawText = await res!.text();
+      const trimmed = (rawText || '').trim();
+      if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+        console.warn('[fetchDatabaseFromServer] Risposta ricevuta non è un JSON valido (rilevato HTML/doctype o payload non oggetto):', trimmed.slice(0, 100));
+        isServerCurrentlyReachable = false;
+        emitNetworkStatusEvent();
+        return null;
+      }
+      data = JSON.parse(trimmed);
+    } catch (parseErr) {
+      console.warn('[fetchDatabaseFromServer] Errore durante il parsing del JSON dal server:', parseErr);
+      isServerCurrentlyReachable = false;
+      emitNetworkStatusEvent();
+      return null;
+    }
+
     if (data && typeof data.tunnelUrl === 'string' && data.tunnelUrl.includes('.trycloudflare.com')) {
       setActiveTryCloudflareUrl(data.tunnelUrl);
     }

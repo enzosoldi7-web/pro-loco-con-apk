@@ -1305,17 +1305,66 @@ interface RegisteredApkDevice {
 const registeredApkClients = new Map<string, RegisteredApkDevice>();
 
 function broadcastServerDbUpdate(db: any) {
+  const currentTunnel = activeTryCloudflareUrl || PERMANENT_BRIDGE_TRYCLOUDFLARE_URL;
+  const nowTs = Date.now();
   const payload = JSON.stringify({
     type: 'db_update',
-    updatedAt: db?.updatedAt || Date.now(),
-    server_updated_at: db?.server_updated_at || db?.updatedAt || Date.now(),
-    tunnelUrl: activeTryCloudflareUrl || PERMANENT_BRIDGE_TRYCLOUDFLARE_URL
+    updatedAt: db?.updatedAt || nowTs,
+    server_updated_at: db?.server_updated_at || db?.updatedAt || nowTs,
+    tunnelUrl: currentTunnel
   });
   for (let i = sseClients.length - 1; i >= 0; i--) {
     try {
       sseClients[i].res.write(`data: ${payload}\n\n`);
     } catch {
       sseClients.splice(i, 1);
+    }
+  }
+
+  // Notifica push istantanea inviata sui canali permanenti di relay (ntfy.sh) per smartphone
+  if (typeof fetch === 'function') {
+    const pushMsg = JSON.stringify({
+      type: 'db_update',
+      title: 'Modifiche Ricevute',
+      body: 'I dati della Pro Loco sono stati aggiornati.',
+      tunnelUrl: currentTunnel,
+      timestamp: nowTs
+    });
+
+    // Topic globale Pro Loco
+    try {
+      fetch(`https://ntfy.sh/${PROLOCO_RELAY_TOPIC}`, {
+        method: 'POST',
+        headers: {
+          'Title': 'Modifiche dal Gestionale',
+          'Tags': 'bell,memo',
+          'Priority': 'default',
+          'X-Action': 'db_update'
+        },
+        body: pushMsg
+      }).catch(() => {});
+    } catch {}
+
+    // Canali univoci per ciascuna tessera socio registrata
+    if (Array.isArray(db?.soci)) {
+      for (const s of db.soci) {
+        if (s && s.numeroTessera) {
+          const sTopic = getSocioRelayTopic(s.numeroTessera);
+          try {
+            fetch(`https://ntfy.sh/${sTopic}`, {
+              method: 'POST',
+              headers: {
+                'Title': `Aggiornamento Tessera ${s.numeroTessera}`,
+                'Tags': 'id_card,bell',
+                'Priority': 'default',
+                'X-Action': 'db_update',
+                'X-Numero-Tessera': s.numeroTessera
+              },
+              body: pushMsg
+            }).catch(() => {});
+          } catch {}
+        }
+      }
     }
   }
 }
@@ -2498,9 +2547,44 @@ async function startServer() {
     .modal-body { padding: 16px; overflow-y: auto; flex: 1; font-size: 13px; line-height: 1.5; }
     .login-gate { position: fixed; inset: 0; background: #f6f4ee; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 18px; }
     .login-card { background: #ffffff; max-width: 400px; width: 100%; border-radius: 24px; padding: 24px 20px; border: 1px solid #e7e5e4; box-shadow: 0 12px 32px rgba(0,0,0,0.08); text-align: center; }
+    /* BANNER NOTIFICA PUSH CELLULARE (POP-DOWN IN ALTO) */
+    .mobile-push-banner { position: fixed; top: 10px; left: 10px; right: 10px; max-width: 520px; margin: 0 auto; z-index: 99999; animation: pushSlideDown 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; cursor: pointer; }
+    @keyframes pushSlideDown { 0% { transform: translateY(-130%); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+    .push-card { background: rgba(15, 23, 42, 0.96); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); color: #ffffff; border-radius: 18px; padding: 12px 14px; display: flex; align-items: center; gap: 12px; box-shadow: 0 14px 34px rgba(0, 0, 0, 0.45), 0 0 0 1.5px rgba(52, 211, 153, 0.4); }
+    .push-icon-box { width: 42px; height: 42px; border-radius: 12px; background: linear-gradient(135deg, #059669, #047857); display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 4px 12px rgba(5, 150, 105, 0.45); }
+    .push-content { flex: 1; min-width: 0; }
+    .push-meta { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #94a3b8; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+    .push-app-name { color: #34d399; font-weight: 800; }
+    .push-bullet { color: #64748b; }
+    .push-time { color: #cbd5e1; }
+    .push-tag { background: rgba(52, 211, 153, 0.25); color: #a7f3d0; padding: 1px 7px; border-radius: 999px; font-size: 9px; font-weight: 800; }
+    .push-title { font-size: 13.5px; font-weight: 800; color: #f8fafc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .push-body { font-size: 11.5px; color: #cbd5e1; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .push-close { background: rgba(255, 255, 255, 0.12); border: none; color: #cbd5e1; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; cursor: pointer; flex-shrink: 0; }
+    .push-close:hover { background: rgba(255, 255, 255, 0.24); color: #ffffff; }
   </style>
 </head>
 <body>
+  <!-- BANNER NOTIFICA PUSH CELLULARE (POP-DOWN AUTOMATICO DA IN ALTO) -->
+  <div id="mobilePushBanner" class="mobile-push-banner" style="display:none;" onclick="handlePushBannerClick()">
+    <div class="push-card">
+      <div class="push-icon-box">
+        <span id="pushIconSymbol" style="font-size:22px;">🔔</span>
+      </div>
+      <div class="push-content">
+        <div class="push-meta">
+          <span class="push-app-name" id="pushAppName">Pro Loco</span>
+          <span class="push-bullet">•</span>
+          <span class="push-time">Adesso</span>
+          <span class="push-tag" id="pushTag">AGGIORNAMENTO</span>
+        </div>
+        <div class="push-title" id="pushTitle">Nuova Notifica Ricevuta</div>
+        <div class="push-body" id="pushBody">Modifiche ricevute dal gestionale.</div>
+      </div>
+      <button type="button" class="push-close" onclick="dismissMobilePushBanner(event)" title="Chiudi notifica">✕</button>
+    </div>
+  </div>
+
   <!-- BLOCCO SBLOCCO PIN INIZIALE (FUNZIONA ANCHE A SERVER SPENTO) -->
   <div id="loginGate" class="login-gate" style="display:none;">
     <div class="login-card">
@@ -2733,6 +2817,121 @@ async function startServer() {
     var IDB_NAME = 'ProLocoLocalRoomSQLiteDB';
     var IDB_VERSION = 2;
     var idbInstance = null;
+
+    // SISTEMA NOTIFICHE PUSH CELLULARE (SUONO, VIBRAZIONE, NOTIFICA DI SISTEMA & BANNER A DISCESA)
+    function playNotificationSound() {
+      try {
+        var AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        var ctx = new AudioCtx();
+        if (ctx.state === 'suspended') ctx.resume();
+        var now = ctx.currentTime;
+        var osc = ctx.createOscillator();
+        var gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(587.33, now); // D5
+        osc.frequency.exponentialRampToValueAtTime(880, now + 0.12); // A5
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.35);
+      } catch (e) {}
+    }
+
+    var pushBannerTimer = null;
+    var currentPushTabAction = 'tessera';
+    var hasNotifiedPushOnce = false;
+    try {
+      if (sessionStorage.getItem('proloco_push_shown_session') === '1') {
+        hasNotifiedPushOnce = true;
+      }
+    } catch (e) {}
+
+    function triggerMobilePushNotification(opts) {
+      if (hasNotifiedPushOnce) return;
+      hasNotifiedPushOnce = true;
+      try {
+        sessionStorage.setItem('proloco_push_shown_session', '1');
+      } catch (e) {}
+
+      opts = opts || {};
+      var title = opts.title || 'Notifica Pro Loco';
+      var body = opts.body || 'Modifiche ricevute dal gestionale.';
+      var icon = opts.icon || '🔔';
+      var tab = opts.tab || 'tessera';
+      currentPushTabAction = tab;
+
+      // 1. Suono Chime Notifica
+      playNotificationSound();
+
+      // 2. Vibrazione Cellulare
+      try {
+        if (typeof navigator !== 'undefined' && navigator.vibrate) {
+          navigator.vibrate([180, 70, 180]);
+        }
+      } catch (e) {}
+
+      // 3. Notifica di Sistema Android / Web Notification
+      try {
+        if (typeof window !== 'undefined' && 'Notification' in window) {
+          if (Notification.permission === 'granted') {
+            new Notification(title, {
+              body: body,
+              icon: 'file:///android_asset/icon.png',
+              tag: 'proloco-push-' + Date.now()
+            });
+          } else if (Notification.permission !== 'denied') {
+            Notification.requestPermission().catch(function() {});
+          }
+        }
+      } catch (e) {}
+
+      // 4. Banner Grafico Push a Discesa in Stile Smartphone (Visibile a schermo su qualsiasi dispositivo/WebView)
+      var banner = document.getElementById('mobilePushBanner');
+      if (banner) {
+        var elT = document.getElementById('pushTitle');
+        var elB = document.getElementById('pushBody');
+        var elI = document.getElementById('pushIconSymbol');
+        var elApp = document.getElementById('pushAppName');
+        if (elT) elT.innerText = title;
+        if (elB) elB.innerText = body;
+        if (elI) elI.innerText = icon;
+        if (elApp && appState) {
+          elApp.innerText = (appState.config && appState.config.nome) || appState.proLoco || 'Pro Loco';
+        }
+
+        banner.style.display = 'block';
+        banner.style.animation = 'none';
+        void banner.offsetWidth; // trigger reflow
+        banner.style.animation = 'pushSlideDown 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards';
+
+        if (pushBannerTimer) clearTimeout(pushBannerTimer);
+        pushBannerTimer = setTimeout(function() {
+          dismissMobilePushBanner();
+        }, 7000);
+      }
+    }
+
+    function dismissMobilePushBanner(ev) {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      var banner = document.getElementById('mobilePushBanner');
+      if (banner) {
+        banner.style.display = 'none';
+      }
+      if (pushBannerTimer) {
+        clearTimeout(pushBannerTimer);
+        pushBannerTimer = null;
+      }
+    }
+
+    function handlePushBannerClick() {
+      if (currentPushTabAction) {
+        switchTab(currentPushTabAction);
+      }
+      dismissMobilePushBanner();
+    }
 
     function normCode(v) {
       var str = String(v || '').toUpperCase();
@@ -3451,8 +3650,22 @@ async function startServer() {
                 var inpEp = document.getElementById('customServerEndpointInput');
                 if (inpEp) inpEp.value = newTun;
                 setSyncStatus(true, 'Nuovo Tunnel Ricevuto (Canale Tessera ' + (appState.socio ? appState.socio.numeroTessera : '') + ')');
+                triggerMobilePushNotification({
+                  title: 'Nuovo Tunnel Ricevuto',
+                  body: 'Il gestionale Pro Loco ha aggiornato il tunnel ed è ora collegato.',
+                  icon: '🌐',
+                  tab: 'tessera'
+                });
                 syncWithServer(true);
               }
+            } else if (msg && (msg.type === 'db_update' || rawMsg.indexOf('db_update') > -1)) {
+              triggerMobilePushNotification({
+                title: msg.title || 'Modifiche dal Gestionale',
+                body: msg.body || 'I dati della tua tessera socio sono stati aggiornati.',
+                icon: '🔔',
+                tab: 'tessera'
+              });
+              syncWithServer(true);
             }
           } catch (e) {}
         };
@@ -3510,12 +3723,26 @@ async function startServer() {
                 saveState(appState);
                 if (msg.type === 'tunnel_update') {
                   setSyncStatus(true, 'Nuovo Tunnel Ricevuto • Sincronizzazione...');
+                  triggerMobilePushNotification({
+                    title: 'Nuovo Tunnel Ricevuto',
+                    body: 'Il server Pro Loco è ora collegato al nuovo tunnel.',
+                    icon: '🌐',
+                    tab: 'tessera'
+                  });
                   syncWithServer(true);
                   return;
                 }
               }
             }
             if (msg && (msg.type === 'db_update' || msg.type === 'connected')) {
+              if (msg.type === 'db_update') {
+                triggerMobilePushNotification({
+                  title: 'Modifiche Ricevute dal Gestionale',
+                  body: 'Nuovi dati sincronizzati con successo dal server.',
+                  icon: '🔔',
+                  tab: 'tessera'
+                });
+              }
               syncWithServer(false);
             }
           } catch (err) {}
@@ -3540,10 +3767,15 @@ async function startServer() {
       var shouldApplyServerDelta = prevServerTs === 0 || incomingServerTs >= prevServerTs;
 
       if (shouldApplyServerDelta) {
+        var hadPriorSync = prevServerTs > 0;
+        var prevQuoteLen = (appState.socio && Array.isArray(appState.socio.quote)) ? appState.socio.quote.length : 0;
+        var prevComLen = Array.isArray(appState.comunicazioni) ? appState.comunicazioni.length : 0;
+        var prevEvtLen = Array.isArray(appState.eventi) ? appState.eventi.length : 0;
+
         if (db.config) appState.config = Object.assign({}, appState.config || {}, db.config);
+        var freshSocio = null;
         if (Array.isArray(db.soci) && appState.socio && appState.socio.numeroTessera) {
           var myNorm = normCode(appState.socio.numeroTessera);
-          var freshSocio = null;
           for (var si = 0; si < db.soci.length; si++) {
             if (normCode(db.soci[si].numeroTessera) === myNorm) {
               freshSocio = db.soci[si];
@@ -3568,6 +3800,45 @@ async function startServer() {
         }
         appState.server_updated_at = incomingServerTs;
         appState.last_sync_server_updated_at = incomingServerTs;
+
+        // Emetti notifica push mobile in-app se ci sono stati effettivi aggiornamenti dal server
+        if (hadPriorSync && incomingServerTs > prevServerTs) {
+          var newQuoteLen = (freshSocio && Array.isArray(freshSocio.quote)) ? freshSocio.quote.length : prevQuoteLen;
+          var newComLen = Array.isArray(db.comunicazioni) ? db.comunicazioni.length : prevComLen;
+          var newEvtLen = Array.isArray(db.eventi) ? db.eventi.length : prevEvtLen;
+
+          if (newQuoteLen > prevQuoteLen) {
+            triggerMobilePushNotification({
+              title: 'Nuova Quota / Ricevuta Registrata',
+              body: 'Il gestionale ha registrato il pagamento della tua quota sociale!',
+              icon: '🧾',
+              tab: 'pagamenti'
+            });
+          } else if (newComLen > prevComLen) {
+            var ultimaCom = db.comunicazioni[db.comunicazioni.length - 1] || {};
+            triggerMobilePushNotification({
+              title: ultimaCom.titolo || 'Nuova Comunicazione Ricevuta',
+              body: ultimaCom.oggetto || ultimaCom.contenuto || 'È presente una nuova comunicazione per te.',
+              icon: '📬',
+              tab: 'comunicazioni'
+            });
+          } else if (newEvtLen > prevEvtLen) {
+            var ultimoEvt = db.eventi[db.eventi.length - 1] || {};
+            triggerMobilePushNotification({
+              title: 'Nuovo Evento in Programma',
+              body: ultimoEvt.titolo || 'Un nuovo evento è stato pubblicato sul calendario.',
+              icon: '🎉',
+              tab: 'eventi'
+            });
+          } else {
+            triggerMobilePushNotification({
+              title: 'Modifiche Ricevute dal Gestionale',
+              body: 'I dati della tua tessera e del portale sono stati aggiornati.',
+              icon: '🔔',
+              tab: 'tessera'
+            });
+          }
+        }
       }
 
       appState.is_dirty = false;
@@ -3766,6 +4037,19 @@ async function startServer() {
         inpEp.value = appState.endpoints[0];
       }
       syncWithServer(false);
+
+      // Avvisa solo una volta, appena aperta la gestione APK
+      setTimeout(function() {
+        if (!hasNotifiedPushOnce) {
+          var appNome = (appState && appState.config && appState.config.nome) || appState.proLoco || 'Pro Loco';
+          triggerMobilePushNotification({
+            title: appNome + ' • Gestionale APK',
+            body: 'Modifiche ricevute dal gestionale. Dati sincronizzati con successo.',
+            icon: '🔔',
+            tab: 'tessera'
+          });
+        }
+      }, 650);
     });
     // Network Change Broadcast & App Foreground Listeners: forza controllo immediato appena la connettività torna stabile
     window.addEventListener('online', function() {
