@@ -98,7 +98,7 @@ export interface DonazioneTerzi {
   annullatoDa?: string;
 }
 
-export type TipoEntitaCestino = 'donazione' | 'socio' | 'evento';
+export type TipoEntitaCestino = 'donazione' | 'socio' | 'evento' | 'movimento';
 
 export interface ElementoCestino {
   id: string; // ID univoco nel cestino (es. 'cestino-don-...')

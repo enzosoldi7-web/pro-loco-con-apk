@@ -1,5 +1,6 @@
 import { Socio, ProLocoInfo, QuotaAssociativa, StatoQuota, ProLocoEvento, StandEvento, SitoWebConfig, GiornalinoConfig, ArticoloGiornalino, EdizioneGiornalino, DonazioneTerzi, CampagnaRaccoltaFondi, ElementoCestino, ComunicazioneSocio, MovimentoContabile } from './types';
 import { calcolaEconomiaEvento, aggregaEventiPerBilancio } from './utils/eventoHelpers';
+import { analizzaMovimentiPerBilancio } from './utils/contabilitaHelpers';
 
 const STORAGE_KEY_SOCI = 'proloco_gestione_soci_v1';
 const STORAGE_KEY_CONFIG = 'proloco_gestione_config_v1';
@@ -2817,6 +2818,103 @@ export function svuotaCestino(): void {
   }
 }
 
+export function cancellaMovimentoContabile(
+  id: string,
+  motivo: string = 'Eliminazione manuale da Prima Nota',
+  eliminatoDa: string = 'Tesoreria / Amministrazione'
+): MovimentoContabile[] {
+  try {
+    const attuali = loadMovimentiContabili();
+    const bersaglio = attuali.find(m => m.id === id);
+    if (!bersaglio) return attuali;
+
+    const nuovaLista = attuali.filter(m => m.id !== id);
+    saveMovimentiContabili(nuovaLista);
+
+    const now = new Date();
+    const ora = now.toTimeString().slice(0, 5);
+    const dataStr = now.toISOString().slice(0, 10);
+    const elementoCestino: ElementoCestino = {
+      id: `cestino-mov-${bersaglio.id}-${Date.now()}`,
+      entitaId: bersaglio.id,
+      tipoEntita: 'movimento',
+      titolo: `${bersaglio.tipo === 'entrata' ? 'Entrata' : 'Uscita'}: ${bersaglio.descrizione}`,
+      sottotitolo: `Data: ${bersaglio.data} • Categoria: ${bersaglio.categoria} • Metodo: ${bersaglio.metodoPagamento || 'N/D'} • Anno: ${bersaglio.anno}`,
+      importo: bersaglio.importo,
+      dataEliminazione: dataStr,
+      oraEliminazione: ora,
+      motivo: motivo.trim() || 'Rettifica contabile / errata registrazione',
+      eliminatoDa: eliminatoDa,
+      datiOriginali: bersaglio
+    };
+    aggiungiAlCestino(elementoCestino);
+
+    if (typeof window !== 'undefined') {
+      try {
+        window.dispatchEvent(new Event('storage'));
+        window.dispatchEvent(new CustomEvent('proloco_movimenti_updated', { detail: nuovaLista }));
+      } catch {
+        // ignore
+      }
+    }
+
+    return nuovaLista;
+  } catch (err) {
+    console.error('Errore cancellazione movimento contabile:', err);
+    return loadMovimentiContabili();
+  }
+}
+
+export function cancellaMultipliMovimentiContabili(
+  ids: string[],
+  motivo: string = 'Eliminazione multipla da Prima Nota',
+  eliminatoDa: string = 'Tesoreria / Amministrazione'
+): MovimentoContabile[] {
+  try {
+    if (!ids || ids.length === 0) return loadMovimentiContabili();
+    const idsSet = new Set(ids);
+    const attuali = loadMovimentiContabili();
+    const bersagli = attuali.filter(m => idsSet.has(m.id));
+    const nuovaLista = attuali.filter(m => !idsSet.has(m.id));
+    saveMovimentiContabili(nuovaLista);
+
+    const now = new Date();
+    const ora = now.toTimeString().slice(0, 5);
+    const dataStr = now.toISOString().slice(0, 10);
+
+    bersagli.forEach((b, idx) => {
+      const elementoCestino: ElementoCestino = {
+        id: `cestino-mov-${b.id}-${Date.now()}-${idx}`,
+        entitaId: b.id,
+        tipoEntita: 'movimento',
+        titolo: `${b.tipo === 'entrata' ? 'Entrata' : 'Uscita'}: ${b.descrizione}`,
+        sottotitolo: `Data: ${b.data} • Categoria: ${b.categoria} • Metodo: ${b.metodoPagamento || 'N/D'} • Anno: ${b.anno}`,
+        importo: b.importo,
+        dataEliminazione: dataStr,
+        oraEliminazione: ora,
+        motivo: motivo.trim() || 'Rettifica contabile multipla',
+        eliminatoDa: eliminatoDa,
+        datiOriginali: b
+      };
+      aggiungiAlCestino(elementoCestino);
+    });
+
+    if (typeof window !== 'undefined') {
+      try {
+        window.dispatchEvent(new Event('storage'));
+        window.dispatchEvent(new CustomEvent('proloco_movimenti_updated', { detail: nuovaLista }));
+      } catch {
+        // ignore
+      }
+    }
+
+    return nuovaLista;
+  } catch (err) {
+    console.error('Errore cancellazione multipla movimenti contabili:', err);
+    return loadMovimentiContabili();
+  }
+}
+
 export function esportaCestinoCSV(elementi: ElementoCestino[], config?: ProLocoInfo): void {
   const intestazioni = [
     'ID Cestino',
@@ -3041,8 +3139,15 @@ export function esportaBilancioCompletoCSV(
   const aggregatoEventi = aggregaEventiPerBilancio(eventiAnno);
   const totaleEntrateEventi = aggregatoEventi.entrateCompetenzaProLoco;
   const totaleCostiEventi = aggregatoEventi.costiCompetenzaProLoco;
-  const totaleEntrateGenerali = totaleQuote + totaleEntrateEventi + totaleDonazioni;
-  const totaleUsciteGenerali = totaleCostiEventi;
+
+  // Analisi movimenti contabili (Prima Nota entrate e uscite autonome)
+  const movimentiTutti = loadMovimentiContabili();
+  const analisiMovimenti = analizzaMovimentiPerBilancio(movimentiTutti, annoFiltro || 'tutti');
+  const totaleEntratePrimaNota = analisiMovimenti.totaleEntrateAutonome;
+  const totaleUscitePrimaNota = analisiMovimenti.totaleUsciteAutonome;
+
+  const totaleEntrateGenerali = totaleQuote + totaleEntrateEventi + totaleDonazioni + totaleEntratePrimaNota;
+  const totaleUsciteGenerali = totaleCostiEventi + totaleUscitePrimaNota;
   const avanzoGestione = totaleEntrateGenerali - totaleUsciteGenerali;
 
   const righeCsv: string[] = [
@@ -3056,7 +3161,10 @@ export function esportaBilancioCompletoCSV(
     `"Entrate Totali da Tesseramento (Quote Sociali)";"${totaleQuote.toFixed(2)}"`,
     `"Entrate Totali da Eventi & Manifestazioni";"${totaleEntrateEventi.toFixed(2)}"`,
     `"Donazioni ed Erogazioni Liberali da Terzi";"${totaleDonazioni.toFixed(2)}"`,
+    `"Contributi Pubblici & Altre Entrate Autonome (Prima Nota)";"${totaleEntratePrimaNota.toFixed(2)}"`,
     `"TOTALE GENERALE ENTRATE PRO LOCO";"${totaleEntrateGenerali.toFixed(2)}"`,
+    `"Costi Totali Manifestazioni Popolari & Eventi";"${totaleCostiEventi.toFixed(2)}"`,
+    `"Spese Generali Sede & Funzionamento (Prima Nota)";"${totaleUscitePrimaNota.toFixed(2)}"`,
     `"TOTALE GENERALE USCITE & COSTI PRO LOCO";"${totaleUsciteGenerali.toFixed(2)}"`,
     `"RISULTATO ECONOMICO (AVANZO/DISAVANZO DI GESTIONE)";"${avanzoGestione.toFixed(2)}"`,
     '""',
@@ -3189,6 +3297,30 @@ export function esportaBilancioCompletoCSV(
       `"${d.metodo}"`,
       `"${d.detraibileFiscale ? 'SI' : 'NO'}"`,
       `"${(d.note || '').replace(/"/g, '""')}"`
+    ].join(';'));
+  });
+
+  // Aggiungi sezione Movimenti Contabili Autonomi & Spese Generali di Struttura (Prima Nota)
+  righeCsv.push('""');
+  righeCsv.push('"DETTAGLIO MOVIMENTI CONTABILI AUTONOMI & SPESE GENERALI DI STRUTTURA (PRIMA NOTA)"');
+  righeCsv.push(
+    `"Data";"Tipo Movimento";"Categoria";"Descrizione";"Importo (€)";"Metodo Pagamento";"Note"`
+  );
+
+  const movimentiAutonomi = [
+    ...analisiMovimenti.entrateAutonome,
+    ...analisiMovimenti.usciteAutonome
+  ].sort((a, b) => b.data.localeCompare(a.data));
+
+  movimentiAutonomi.forEach(m => {
+    righeCsv.push([
+      `"${m.data}"`,
+      `"${m.tipo.toUpperCase()}"`,
+      `"${m.categoria}"`,
+      `"${m.descrizione.replace(/"/g, '""')}"`,
+      `"${Number(m.importo).toFixed(2)}"`,
+      `"${m.metodoPagamento || 'Bonifico'}"`,
+      `"${(m.note || '').replace(/"/g, '""')}"`
     ].join(';'));
   });
 

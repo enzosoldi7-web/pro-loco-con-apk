@@ -1,8 +1,10 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { MovimentoContabile, TipoMovimentoContabile, Socio, ProLocoEvento, DonazioneTerzi, ProLocoInfo } from '../types';
 import { 
   loadMovimentiContabili, 
   saveMovimentiContabili, 
+  cancellaMovimentoContabile,
+  cancellaMultipliMovimentiContabili,
   esportaMovimentiContabiliCSV 
 } from '../storage';
 import {
@@ -21,6 +23,8 @@ import {
   Edit2,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
+  ShieldAlert,
   FileText,
   Building2,
   ArrowUpRight,
@@ -30,7 +34,9 @@ import {
   Layers,
   Check,
   X,
-  PieChart as PieChartIcon
+  PieChart as PieChartIcon,
+  CheckSquare,
+  Square
 } from 'lucide-react';
 
 interface MovimentiContabiliViewProps {
@@ -39,6 +45,8 @@ interface MovimentiContabiliViewProps {
   soci?: Socio[];
   eventi?: ProLocoEvento[];
   donazioni?: DonazioneTerzi[];
+  movimenti?: MovimentoContabile[];
+  onMovimentiChange?: (nuovi: MovimentoContabile[]) => void;
 }
 
 export const CATEGORIE_ENTRATE = [
@@ -74,9 +82,23 @@ export const MovimentiContabiliView: React.FC<MovimentiContabiliViewProps> = ({
   annoSelezionato,
   config,
   soci = [],
-  donazioni = []
+  eventi = [],
+  donazioni = [],
+  movimenti: movimentiProp,
+  onMovimentiChange
 }) => {
-  const [movimenti, setMovimenti] = useState<MovimentoContabile[]>(() => loadMovimentiContabili());
+  const [movimenti, setMovimenti] = useState<MovimentoContabile[]>(() => {
+    if (movimentiProp && movimentiProp.length > 0) return movimentiProp;
+    return loadMovimentiContabili();
+  });
+
+  // Mantieni sincronizzato lo stato locale se i props esterni cambiano
+  React.useEffect(() => {
+    if (movimentiProp) {
+      setMovimenti(movimentiProp);
+    }
+  }, [movimentiProp]);
+
   const [filtroTipo, setFiltroTipo] = useState<'tutti' | 'entrata' | 'uscita'>('tutti');
   const [filtroCategoria, setFiltroCategoria] = useState<string>('tutte');
   const [ricercaTesto, setRicercaTesto] = useState<string>('');
@@ -100,6 +122,29 @@ export const MovimentiContabiliView: React.FC<MovimentiContabiliViewProps> = ({
     setNotifica({ tipo, testo });
     setTimeout(() => setNotifica(null), 4000);
   };
+
+  // Stato eliminazione singola con modale dedicata e audit log
+  const [movimentoDaEliminare, setMovimentoDaEliminare] = useState<MovimentoContabile | null>(null);
+  const [motivoEliminazione, setMotivoEliminazione] = useState<string>('Rettifica contabile / errata registrazione');
+  const [isEliminazioneInCorso, setIsEliminazioneInCorso] = useState(false);
+
+  // Stato selezione multipla e cancellazione massiva
+  const [selezionatiIds, setSelezionatiIds] = useState<string[]>([]);
+  const [mostraConfermaMultipla, setMostraConfermaMultipla] = useState(false);
+
+  // Ascolto in tempo reale degli eventi di sincronizzazione storage
+  useEffect(() => {
+    const handleSync = () => {
+      const aggiornati = loadMovimentiContabili();
+      setMovimenti(aggiornati);
+    };
+    window.addEventListener('storage', handleSync);
+    window.addEventListener('proloco_movimenti_updated', handleSync);
+    return () => {
+      window.removeEventListener('storage', handleSync);
+      window.removeEventListener('proloco_movimenti_updated', handleSync);
+    };
+  }, []);
 
   // Anni disponibili
   const anniDisponibili = useMemo(() => {
@@ -257,6 +302,7 @@ export const MovimentiContabiliView: React.FC<MovimentiContabiliViewProps> = ({
       const nuovaLista = movimenti.map(m => m.id === aggiornato.id ? aggiornato : m);
       setMovimenti(nuovaLista);
       saveMovimentiContabili(nuovaLista);
+      onMovimentiChange?.(nuovaLista);
       mostraNotifica('success', 'Registrazione contabile aggiornata con successo!');
     } else {
       const nuovo: MovimentoContabile = {
@@ -275,23 +321,74 @@ export const MovimentiContabiliView: React.FC<MovimentiContabiliViewProps> = ({
       const nuovaLista = [nuovo, ...movimenti];
       setMovimenti(nuovaLista);
       saveMovimentiContabili(nuovaLista);
+      onMovimentiChange?.(nuovaLista);
       mostraNotifica('success', `${tipoNuovo === 'entrata' ? 'Entrata' : 'Uscita'} registrata con successo!`);
     }
 
     setModalAperta(false);
   };
 
-  // Eliminazione
-  const handleElimina = (id: string, descrizione: string) => {
-    if (window.confirm(`Sei sicuro di voler eliminare la registrazione contabile: "${descrizione}"?`)) {
-      const nuovaLista = movimenti.filter(m => m.id !== id);
-      setMovimenti(nuovaLista);
-      saveMovimentiContabili(nuovaLista);
-      mostraNotifica('info', 'Registrazione contabile rimossa.');
+  // Gestione Eliminazione Singola
+  const handleAvviaElimina = (m: MovimentoContabile) => {
+    setMovimentoDaEliminare(m);
+    setMotivoEliminazione('Rettifica contabile / errata registrazione');
+  };
+
+  const handleConfermaElimina = () => {
+    if (!movimentoDaEliminare) return;
+    setIsEliminazioneInCorso(true);
+    const id = movimentoDaEliminare.id;
+    const desc = movimentoDaEliminare.descrizione;
+    const nuovaLista = cancellaMovimentoContabile(
+      id,
+      motivoEliminazione || 'Rettifica contabile / errata registrazione',
+      'Tesoreria / Amministrazione'
+    );
+    setMovimenti(nuovaLista);
+    onMovimentiChange?.(nuovaLista);
+    setSelezionatiIds(prev => prev.filter(item => item !== id));
+    mostraNotifica('info', `Registrazione "${desc}" archiviata nel Cestino di Sistema.`);
+    setMovimentoDaEliminare(null);
+    setIsEliminazioneInCorso(false);
+  };
+
+  // Selezione Singola / Multipla
+  const toggleSelezione = (id: string) => {
+    setSelezionatiIds(prev =>
+      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+    );
+  };
+
+  const selezionaTuttiVisibili = () => {
+    const idsVisibili = movimentiFiltrati.map(m => m.id);
+    const tuttiSelezionati = idsVisibili.length > 0 && idsVisibili.every(id => selezionatiIds.includes(id));
+    if (tuttiSelezionati) {
+      setSelezionatiIds(prev => prev.filter(id => !idsVisibili.includes(id)));
+    } else {
+      const unione = Array.from(new Set([...selezionatiIds, ...idsVisibili]));
+      setSelezionatiIds(unione);
     }
   };
 
-  // Allineamento automatico da Quote e Donazioni esistenti
+  // Conferma Eliminazione Massiva
+  const handleConfermaEliminazioneMassiva = () => {
+    if (selezionatiIds.length === 0) return;
+    setIsEliminazioneInCorso(true);
+    const count = selezionatiIds.length;
+    const nuovaLista = cancellaMultipliMovimentiContabili(
+      selezionatiIds,
+      motivoEliminazione || `Eliminazione massiva di ${count} registrazioni contabili`,
+      'Tesoreria / Amministrazione'
+    );
+    setMovimenti(nuovaLista);
+    onMovimentiChange?.(nuovaLista);
+    setSelezionatiIds([]);
+    setMostraConfermaMultipla(false);
+    mostraNotifica('info', `${count} registrazioni contabili archiviate nel Cestino.`);
+    setIsEliminazioneInCorso(false);
+  };
+
+  // Allineamento automatico da Quote, Donazioni ed Eventi esistenti
   const handleImportaAutomatico = () => {
     let importati = 0;
     const nuoviMovimenti: MovimentoContabile[] = [...movimenti];
@@ -345,12 +442,57 @@ export const MovimentiContabiliView: React.FC<MovimentiContabiliViewProps> = ({
       }
     });
 
+    // 3. Allinea Eventi / Manifestazioni dell'anno
+    eventi.forEach(e => {
+      const annoEv = parseInt((e.dataInizio || '').substring(0, 4), 10);
+      if (annoEv === annoTarget) {
+        if ((e.costiSostenuti || 0) > 0) {
+          const refCosto = `evento-costo-${e.id}`;
+          if (!nuoviMovimenti.some(m => m.riferimentoId === refCosto)) {
+            nuoviMovimenti.push({
+              id: `mov-sync-c-${e.id}`,
+              data: e.dataInizio || `${annoTarget}-06-01`,
+              tipo: 'uscita',
+              descrizione: `Spese Manifestazione: ${e.titolo}`,
+              importo: e.costiSostenuti || 0,
+              categoria: 'spese_eventi',
+              metodoPagamento: 'Bonifico Bancario',
+              riferimentoId: refCosto,
+              anno: annoTarget,
+              note: `Consuntivo evento ${e.categoria} (${e.luogo})`
+            });
+            importati++;
+          }
+        }
+
+        if ((e.entrateRealizzate || 0) > 0) {
+          const refIncasso = `evento-incasso-${e.id}`;
+          if (!nuoviMovimenti.some(m => m.riferimentoId === refIncasso)) {
+            nuoviMovimenti.push({
+              id: `mov-sync-i-${e.id}`,
+              data: e.dataFine || e.dataInizio || `${annoTarget}-06-01`,
+              tipo: 'entrata',
+              descrizione: `Incassi Manifestazione: ${e.titolo}`,
+              importo: e.entrateRealizzate || 0,
+              categoria: 'proventi_eventi',
+              metodoPagamento: 'Contanti',
+              riferimentoId: refIncasso,
+              anno: annoTarget,
+              note: `Incasso realizzato evento ${e.categoria} (${e.luogo})`
+            });
+            importati++;
+          }
+        }
+      }
+    });
+
     if (importati > 0) {
       setMovimenti(nuoviMovimenti);
       saveMovimentiContabili(nuoviMovimenti);
-      mostraNotifica('success', `Importate ed allineate ${importati} nuove voci contabili dall'archivio!`);
+      onMovimentiChange?.(nuoviMovimenti);
+      mostraNotifica('success', `Importate ed allineate ${importati} registrazioni contabili dai moduli dell'anno!`);
     } else {
-      mostraNotifica('info', 'Tutte le quote e donazioni dell\'anno sono già presenti nella prima nota.');
+      mostraNotifica('info', 'Tutte le voci dell\'anno (quote, donazioni, eventi) sono già registrate in prima nota.');
     }
   };
 
@@ -367,9 +509,13 @@ export const MovimentiContabiliView: React.FC<MovimentiContabiliViewProps> = ({
       {/* Banner Intestazione Sezione Contabile */}
       <div className="bg-gradient-to-r from-slate-900 via-stone-900 to-emerald-950 rounded-2xl p-5 sm:p-6 text-white shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 border border-emerald-800/40">
         <div className="space-y-1.5">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-700/80 text-emerald-100 border border-emerald-500/40">
               Contabilità &amp; Prima Nota
+            </span>
+            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-teal-500/30 text-teal-200 border border-teal-400/30 flex items-center gap-1">
+              <CheckCircle2 className="w-3 h-3 text-teal-300" />
+              <span>Integrata nel Bilancio &amp; Modello D RUNTS</span>
             </span>
             <span className="text-xs text-emerald-200/90 font-medium">
               Esercizio {filtroAnno === 'tutti' ? 'Globale' : filtroAnno}
@@ -380,7 +526,7 @@ export const MovimentiContabiliView: React.FC<MovimentiContabiliViewProps> = ({
             <span>Gestione Contabile Semplificata</span>
           </h2>
           <p className="text-xs text-slate-300 max-w-2xl font-normal leading-relaxed">
-            Registra e monitora con precisione tutte le <strong>entrate</strong> (quote associative, donazioni liberali, contributi) e le <strong>uscite</strong> (spese per eventi, acquisto materiali, utenze e servizi) della Pro Loco.
+            Registra e monitora tutte le <strong>entrate</strong> e <strong>uscite</strong> di cassa e banca. Le uscite generali di struttura (utenze, affitti, assicurazioni, cancelleria, rimborsi volontari, consulenze) e le entrate autonome (contributi comunali/regionali/UNPLI, sponsor) vengono <strong>contabilizzate automaticamente nel Bilancio Generale e nel Modello D RUNTS</strong>.
           </p>
         </div>
 
@@ -625,18 +771,63 @@ export const MovimentiContabiliView: React.FC<MovimentiContabiliViewProps> = ({
         </div>
       </div>
 
+      {/* Barra Azione Rapida Selezione Multipla */}
+      {selezionatiIds.length > 0 && (
+        <div className="bg-slate-900 text-white rounded-2xl p-3 px-4 flex flex-wrap items-center justify-between gap-3 shadow-lg border border-slate-700 animate-in fade-in slide-in-from-top-2">
+          <div className="flex items-center gap-2.5 text-xs font-bold">
+            <span className="w-6 h-6 rounded-lg bg-emerald-500 text-slate-950 flex items-center justify-center font-black">
+              {selezionatiIds.length}
+            </span>
+            <span>movimenti contabili selezionati</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setSelezionatiIds([])}
+              className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-semibold transition cursor-pointer"
+            >
+              Deseleziona
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMotivoEliminazione(`Rettifica massiva di ${selezionatiIds.length} registrazioni`);
+                setMostraConfermaMultipla(true);
+              }}
+              className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-xs cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Elimina Selezionati ({selezionatiIds.length})</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Tabella Libro Giornale / Prima Nota */}
       <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs overflow-hidden">
-        <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+        <div className="p-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2 bg-slate-50/50">
           <div className="flex items-center gap-2">
             <Receipt className="w-4 h-4 text-emerald-700" />
             <h3 className="text-sm font-black text-slate-900 tracking-tight">
               Registro Cronologico Movimenti Contabili
             </h3>
           </div>
-          <span className="text-xs text-slate-500 font-medium">
-            Visualizzati <strong>{movimentiConSaldo.length}</strong> movimenti
-          </span>
+          <div className="flex items-center gap-3">
+            {movimentiConSaldo.length > 0 && (
+              <button
+                type="button"
+                onClick={selezionaTuttiVisibili}
+                className="text-[11px] text-slate-600 hover:text-slate-900 font-semibold cursor-pointer underline underline-offset-2"
+              >
+                {movimentiConSaldo.every(m => selezionatiIds.includes(m.id))
+                  ? 'Deseleziona tutti'
+                  : 'Seleziona tutti visibili'}
+              </button>
+            )}
+            <span className="text-xs text-slate-500 font-medium">
+              Visualizzati <strong>{movimentiConSaldo.length}</strong> movimenti
+            </span>
+          </div>
         </div>
 
         {movimentiConSaldo.length === 0 ? (
@@ -650,117 +841,222 @@ export const MovimentiContabiliView: React.FC<MovimentiContabiliViewProps> = ({
               <button
                 type="button"
                 onClick={() => handleApriNuovo('entrata')}
-                className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold"
+                className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
               >
                 + Registra Entrata
               </button>
               <button
                 type="button"
                 onClick={() => handleApriNuovo('uscita')}
-                className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold"
+                className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
               >
                 + Registra Uscita
               </button>
             </div>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs">
-              <thead>
-                <tr className="bg-slate-100/70 border-b border-slate-200 text-slate-600 font-bold uppercase text-[10px] tracking-wider">
-                  <th className="py-3 px-3.5">Data</th>
-                  <th className="py-3 px-3">Tipo</th>
-                  <th className="py-3 px-4">Descrizione &amp; Causale</th>
-                  <th className="py-3 px-3">Categoria</th>
-                  <th className="py-3 px-3">Metodo</th>
-                  <th className="py-3 px-3.5 text-right">Importo (€)</th>
-                  <th className="py-3 px-3.5 text-right">Saldo Progr. (€)</th>
-                  <th className="py-3 px-3 text-center">Azioni</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {movimentiConSaldo.map((m) => {
-                  const isEntrata = m.tipo === 'entrata';
-                  return (
-                    <tr key={m.id} className="hover:bg-slate-50/80 transition-colors">
-                      {/* Data */}
-                      <td className="py-3 px-3.5 font-mono text-slate-700 whitespace-nowrap">
-                        {m.data ? new Date(m.data).toLocaleDateString('it-IT') : '-'}
-                      </td>
+          <>
+            {/* Vista Tabella (Desktop & Tablet) */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-100/70 border-b border-slate-200 text-slate-600 font-bold uppercase text-[10px] tracking-wider">
+                    <th className="py-3 px-3 w-10 text-center">
+                      <input
+                        type="checkbox"
+                        checked={movimentiConSaldo.length > 0 && movimentiConSaldo.every(m => selezionatiIds.includes(m.id))}
+                        onChange={selezionaTuttiVisibili}
+                        className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 border-slate-300 cursor-pointer"
+                        title="Seleziona / Deseleziona tutti i movimenti visibili"
+                      />
+                    </th>
+                    <th className="py-3 px-3.5">Data</th>
+                    <th className="py-3 px-3">Tipo</th>
+                    <th className="py-3 px-4">Descrizione &amp; Causale</th>
+                    <th className="py-3 px-3">Categoria</th>
+                    <th className="py-3 px-3">Metodo</th>
+                    <th className="py-3 px-3.5 text-right">Importo (€)</th>
+                    <th className="py-3 px-3.5 text-right">Saldo Progr. (€)</th>
+                    <th className="py-3 px-3 text-center">Azioni</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {movimentiConSaldo.map((m) => {
+                    const isEntrata = m.tipo === 'entrata';
+                    const isChecked = selezionatiIds.includes(m.id);
+                    return (
+                      <tr 
+                        key={m.id} 
+                        className={`transition-colors ${
+                          isChecked ? 'bg-emerald-50/50 hover:bg-emerald-50' : 'hover:bg-slate-50/80'
+                        }`}
+                      >
+                        {/* Checkbox Selezione */}
+                        <td className="py-3 px-3 text-center">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => toggleSelezione(m.id)}
+                            className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 border-slate-300 cursor-pointer"
+                          />
+                        </td>
 
-                      {/* Tipo */}
-                      <td className="py-3 px-3 whitespace-nowrap">
-                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                          isEntrata 
-                            ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' 
-                            : 'bg-rose-100 text-rose-800 border border-rose-300'
+                        {/* Data */}
+                        <td className="py-3 px-3.5 font-mono text-slate-700 whitespace-nowrap">
+                          {m.data ? new Date(m.data).toLocaleDateString('it-IT') : '-'}
+                        </td>
+
+                        {/* Tipo */}
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            isEntrata 
+                              ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' 
+                              : 'bg-rose-100 text-rose-800 border border-rose-300'
+                          }`}>
+                            {isEntrata ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+                            <span>{isEntrata ? 'Entrata' : 'Uscita'}</span>
+                          </span>
+                        </td>
+
+                        {/* Descrizione */}
+                        <td className="py-3 px-4">
+                          <div className="font-bold text-slate-900 leading-snug">{m.descrizione}</div>
+                          {m.note && (
+                            <div className="text-[11px] text-slate-500 mt-0.5 italic">{m.note}</div>
+                          )}
+                        </td>
+
+                        {/* Categoria */}
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          <span className="text-[11px] font-medium text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md">
+                            {getNomeCategoria(m.categoria)}
+                          </span>
+                        </td>
+
+                        {/* Metodo Pagamento */}
+                        <td className="py-3 px-3 text-slate-600 whitespace-nowrap">
+                          {m.metodoPagamento || '-'}
+                        </td>
+
+                        {/* Importo */}
+                        <td className={`py-3 px-3.5 text-right font-mono font-bold whitespace-nowrap ${
+                          isEntrata ? 'text-emerald-700' : 'text-rose-700'
                         }`}>
-                          {isEntrata ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
-                          <span>{isEntrata ? 'Entrata' : 'Uscita'}</span>
-                        </span>
-                      </td>
+                          {isEntrata ? '+ ' : '- '}€ {Number(m.importo).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </td>
 
-                      {/* Descrizione */}
-                      <td className="py-3 px-4">
-                        <div className="font-bold text-slate-900 leading-snug">{m.descrizione}</div>
-                        {m.note && (
-                          <div className="text-[11px] text-slate-500 mt-0.5 italic">{m.note}</div>
-                        )}
-                      </td>
+                        {/* Saldo Progressivo */}
+                        <td className={`py-3 px-3.5 text-right font-mono font-semibold whitespace-nowrap ${
+                          m.saldoProgressivo >= 0 ? 'text-slate-800' : 'text-rose-700'
+                        }`}>
+                          € {m.saldoProgressivo.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </td>
 
-                      {/* Categoria */}
-                      <td className="py-3 px-3 whitespace-nowrap">
-                        <span className="text-[11px] font-medium text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md">
-                          {getNomeCategoria(m.categoria)}
-                        </span>
-                      </td>
+                        {/* Azioni */}
+                        <td className="py-3 px-3 text-center whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleApriModifica(m)}
+                              title="Modifica registrazione"
+                              className="p-1.5 rounded-lg hover:bg-slate-200 text-slate-600 hover:text-slate-900 transition-colors cursor-pointer"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleAvviaElimina(m)}
+                              title="Elimina registrazione contabile"
+                              className="p-1.5 rounded-lg hover:bg-rose-100 text-slate-400 hover:text-rose-700 transition-colors cursor-pointer group"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
 
-                      {/* Metodo Pagamento */}
-                      <td className="py-3 px-3 text-slate-600 whitespace-nowrap">
-                        {m.metodoPagamento || '-'}
-                      </td>
+            {/* Vista Schede Mobile (< md) */}
+            <div className="block md:hidden divide-y divide-slate-100">
+              {movimentiConSaldo.map((m) => {
+                const isEntrata = m.tipo === 'entrata';
+                const isChecked = selezionatiIds.includes(m.id);
+                return (
+                  <div 
+                    key={m.id} 
+                    className={`p-4 space-y-3 transition-colors ${
+                      isChecked ? 'bg-emerald-50/50' : 'hover:bg-slate-50/50'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2.5">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleSelezione(m.id)}
+                          className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 border-slate-300 cursor-pointer mt-0.5"
+                        />
+                        <div>
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            isEntrata 
+                              ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' 
+                              : 'bg-rose-100 text-rose-800 border border-rose-300'
+                          }`}>
+                            {isEntrata ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+                            <span>{isEntrata ? 'Entrata' : 'Uscita'}</span>
+                          </span>
+                          <span className="text-[11px] font-mono text-slate-500 ml-2">
+                            {m.data ? new Date(m.data).toLocaleDateString('it-IT') : '-'}
+                          </span>
+                        </div>
+                      </div>
 
-                      {/* Importo */}
-                      <td className={`py-3 px-3.5 text-right font-mono font-bold whitespace-nowrap ${
+                      <div className={`text-sm font-mono font-black ${
                         isEntrata ? 'text-emerald-700' : 'text-rose-700'
                       }`}>
                         {isEntrata ? '+ ' : '- '}€ {Number(m.importo).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </td>
+                      </div>
+                    </div>
 
-                      {/* Saldo Progressivo */}
-                      <td className={`py-3 px-3.5 text-right font-mono font-semibold whitespace-nowrap ${
-                        m.saldoProgressivo >= 0 ? 'text-slate-800' : 'text-rose-700'
-                      }`}>
-                        € {m.saldoProgressivo.toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </td>
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-900 leading-snug">{m.descrizione}</h4>
+                      {m.note && (
+                        <p className="text-[11px] text-slate-500 mt-0.5 italic">{m.note}</p>
+                      )}
+                    </div>
 
-                      {/* Azioni */}
-                      <td className="py-3 px-3 text-center whitespace-nowrap">
-                        <div className="inline-flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => handleApriModifica(m)}
-                            title="Modifica registrazione"
-                            className="p-1 rounded-lg hover:bg-slate-200 text-slate-600 hover:text-slate-900 transition-colors cursor-pointer"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleElimina(m.id, m.descrizione)}
-                            title="Elimina registrazione"
-                            className="p-1 rounded-lg hover:bg-rose-100 text-slate-400 hover:text-rose-700 transition-colors cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 text-[11px]">
+                      <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md font-medium">
+                        {getNomeCategoria(m.categoria)}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleApriModifica(m)}
+                          className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold flex items-center gap-1 text-[11px] cursor-pointer"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                          <span>Modifica</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAvviaElimina(m)}
+                          className="px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold flex items-center gap-1 text-[11px] cursor-pointer"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>Elimina</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
         )}
       </div>
 
@@ -950,6 +1246,203 @@ export const MovimentiContabiliView: React.FC<MovimentiContabiliViewProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* MODALE CONFERMA ELIMINAZIONE SINGOLA (SENZA WINDOW.CONFIRM) */}
+      {/* ======================================================== */}
+      {movimentoDaEliminare && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-rose-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            {/* Header Modale */}
+            <div className="px-5 py-4 bg-gradient-to-r from-rose-900 to-slate-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-rose-500/20 text-rose-300 flex items-center justify-center border border-rose-400/30">
+                  <Trash2 className="w-4 h-4 text-rose-300" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold tracking-tight">
+                    Elimina Registrazione Contabile
+                  </h3>
+                  <p className="text-[10px] text-rose-200">
+                    Archiviazione sicura nel Cestino &amp; Registro Audit
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMovimentoDaEliminare(null)}
+                className="text-white/80 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Corpo Modale */}
+            <div className="p-5 space-y-4 text-xs">
+              <div className="p-3.5 bg-rose-50/80 rounded-2xl border border-rose-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black ${
+                    movimentoDaEliminare.tipo === 'entrata'
+                      ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                      : 'bg-rose-100 text-rose-900 border border-rose-300'
+                  }`}>
+                    {movimentoDaEliminare.tipo === 'entrata' ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+                    <span>{movimentoDaEliminare.tipo === 'entrata' ? 'Entrata di Cassa' : 'Uscita di Spesa'}</span>
+                  </span>
+                  <span className={`font-mono font-black text-sm ${
+                    movimentoDaEliminare.tipo === 'entrata' ? 'text-emerald-700' : 'text-rose-700'
+                  }`}>
+                    {movimentoDaEliminare.tipo === 'entrata' ? '+ ' : '- '}€ {Number(movimentoDaEliminare.importo).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+
+                <div>
+                  <div className="font-extrabold text-slate-900 text-sm">
+                    {movimentoDaEliminare.descrizione}
+                  </div>
+                  {movimentoDaEliminare.note && (
+                    <div className="text-[11px] text-slate-500 italic mt-0.5">
+                      {movimentoDaEliminare.note}
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-2 border-t border-rose-200/70 grid grid-cols-2 gap-2 text-[11px] text-slate-600">
+                  <div>
+                    <span className="text-[9px] uppercase font-bold text-slate-400 block">Data Contabile:</span>
+                    <span className="font-semibold text-slate-800">
+                      {movimentoDaEliminare.data ? new Date(movimentoDaEliminare.data).toLocaleDateString('it-IT') : '-'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[9px] uppercase font-bold text-slate-400 block">Categoria:</span>
+                    <span className="font-semibold text-slate-800">
+                      {getNomeCategoria(movimentoDaEliminare.categoria)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Campo Motivo Eliminazione */}
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  Motivo della cancellazione / storno (opzionale):
+                </label>
+                <input
+                  type="text"
+                  value={motivoEliminazione}
+                  onChange={(e) => setMotivoEliminazione(e.target.value)}
+                  placeholder="Es. Errata imputazione, duplicato, storno deliberato..."
+                  className="w-full text-xs px-3 py-2 border border-slate-300 rounded-xl focus:ring-2 focus:ring-rose-500/20 focus:border-rose-400 bg-white"
+                />
+              </div>
+
+              {/* Avviso Trasparenza Fiscale */}
+              <div className="flex items-start gap-2 p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-slate-600 text-[11px]">
+                <ShieldAlert className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+                <p className="leading-relaxed">
+                  L&apos;importo verrà immediatamente stornato da Prima Nota e Bilancio. La voce confluirà nel <strong>Cestino di Sistema</strong> per tracciabilità storica e potrà essere ripristinata in qualsiasi momento.
+                </p>
+              </div>
+
+              {/* Bottoni Azione */}
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setMovimentoDaEliminare(null)}
+                  disabled={isEliminazioneInCorso}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  Annulla
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfermaElimina}
+                  disabled={isEliminazioneInCorso}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 active:bg-rose-800 shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{isEliminazioneInCorso ? 'Cancellazione...' : 'Elimina Movimento'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* MODALE CONFERMA ELIMINAZIONE MASSIVA                     */}
+      {/* ======================================================== */}
+      {mostraConfermaMultipla && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-rose-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="px-5 py-4 bg-gradient-to-r from-rose-900 to-slate-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-rose-500/20 text-rose-300 flex items-center justify-center border border-rose-400/30">
+                  <AlertTriangle className="w-4 h-4 text-rose-300" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold tracking-tight">
+                    Elimina {selezionatiIds.length} Movimenti
+                  </h3>
+                  <p className="text-[10px] text-rose-200">
+                    Cancellazione multipla da Prima Nota
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMostraConfermaMultipla(false)}
+                className="text-white/80 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Corpo */}
+            <div className="p-5 space-y-4 text-xs">
+              <p className="text-slate-700 leading-relaxed">
+                Stai per rimuovere <strong>{selezionatiIds.length} registrazioni contabili</strong> contemporaneamente. Le registrazioni verranno escluse dal bilancio e archiviate nel Cestino di Sistema con apposito log probatorio.
+              </p>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  Motivo eliminazione massiva:
+                </label>
+                <input
+                  type="text"
+                  value={motivoEliminazione}
+                  onChange={(e) => setMotivoEliminazione(e.target.value)}
+                  placeholder="Es. Rettifica contabile massiva..."
+                  className="w-full text-xs px-3 py-2 border border-slate-300 rounded-xl focus:ring-2 focus:ring-rose-500/20 focus:border-rose-400 bg-white"
+                />
+              </div>
+
+              {/* Bottoni Azione */}
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setMostraConfermaMultipla(false)}
+                  disabled={isEliminazioneInCorso}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  Annulla
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfermaEliminazioneMassiva}
+                  disabled={isEliminazioneInCorso}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 active:bg-rose-800 shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{isEliminazioneInCorso ? 'Cancellazione...' : `Elimina ${selezionatiIds.length} Movimenti`}</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

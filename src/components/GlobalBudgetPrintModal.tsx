@@ -17,12 +17,14 @@ import {
   Store,
   Utensils,
   Layers,
-  HeartHandshake
+  HeartHandshake,
+  Receipt
 } from 'lucide-react';
 import { esportaElementoInPDF } from '../utils/pdfExport';
 import { calcolaScadenzaQuota, getSociNonRinnovati } from '../utils/quoteHelpers';
-import { STAND_SIMULATI_DEFAULT, loadDonazioni } from '../storage';
+import { STAND_SIMULATI_DEFAULT, loadDonazioni, loadMovimentiContabili } from '../storage';
 import { calcolaEconomiaEvento, aggregaEventiPerBilancio } from '../utils/eventoHelpers';
+import { analizzaMovimentiPerBilancio } from '../utils/contabilitaHelpers';
 
 interface GlobalBudgetPrintModalProps {
   soci: Socio[];
@@ -92,9 +94,15 @@ export const GlobalBudgetPrintModal: React.FC<GlobalBudgetPrintModalProps> = ({
   const totaleEntrateEventi = aggregatoEventi.entrateCompetenzaProLoco;
   const totaleBudgetPreventivato = aggregatoEventi.budgetPrevistoProLoco;
 
-  // Bilancio Globale (Quote + Eventi + Donazioni da terzi)
-  const totaleEntrateGenerali = totaleQuote + totaleEntrateEventi + totaleDonazioni;
-  const totaleUsciteGenerali = totaleSpeseEventi;
+  // Movimenti Prima Nota (entrate autonome e spese generali di funzionamento)
+  const movimentiTutti = loadMovimentiContabili();
+  const analisiMovimenti = analizzaMovimentiPerBilancio(movimentiTutti, annoSelezionato);
+  const totaleEntratePrimaNota = analisiMovimenti.totaleEntrateAutonome;
+  const totaleUscitePrimaNota = analisiMovimenti.totaleUsciteAutonome;
+
+  // Bilancio Globale (Quote + Eventi + Donazioni da terzi + Prima Nota)
+  const totaleEntrateGenerali = totaleQuote + totaleEntrateEventi + totaleDonazioni + totaleEntratePrimaNota;
+  const totaleUsciteGenerali = totaleSpeseEventi + totaleUscitePrimaNota;
   const avanzoGestione = totaleEntrateGenerali - totaleUsciteGenerali;
 
   // Quote da Incassare e Scadenza Statutaria Esercizio
@@ -296,6 +304,9 @@ export const GlobalBudgetPrintModal: React.FC<GlobalBudgetPrintModalProps> = ({
                 <div>• Quote Tesseramento: {(totaleQuote || 0).toLocaleString('it-IT')} €</div>
                 <div>• Incassi Eventi & Sagre: {(totaleEntrateEventi || 0).toLocaleString('it-IT')} €</div>
                 <div>• Donazioni da Terzi: {(totaleDonazioni || 0).toLocaleString('it-IT')} €</div>
+                {totaleEntratePrimaNota > 0 && (
+                  <div>• Contributi Pubblici & Prima Nota: {(totaleEntratePrimaNota || 0).toLocaleString('it-IT')} €</div>
+                )}
               </div>
             </div>
 
@@ -306,7 +317,10 @@ export const GlobalBudgetPrintModal: React.FC<GlobalBudgetPrintModalProps> = ({
               </span>
               <div className="text-[10px] text-slate-500 mt-1 space-y-0.5">
                 <div>• Costi Eventi & Sagre: {(totaleSpeseEventi || 0).toLocaleString('it-IT')} €</div>
-                <div>• Scostamento dal Prev.: {((totaleUsciteGenerali || 0) - (totaleBudgetPreventivato || 0) > 0 ? '+' : '')}{((totaleUsciteGenerali || 0) - (totaleBudgetPreventivato || 0)).toLocaleString('it-IT')} €</div>
+                {totaleUscitePrimaNota > 0 && (
+                  <div>• Spese Sede & Gestione (Prima Nota): {(totaleUscitePrimaNota || 0).toLocaleString('it-IT')} €</div>
+                )}
+                <div>• Scostamento Eventi dal Prev.: {((totaleSpeseEventi || 0) - (totaleBudgetPreventivato || 0) > 0 ? '+' : '')}{((totaleSpeseEventi || 0) - (totaleBudgetPreventivato || 0)).toLocaleString('it-IT')} €</div>
               </div>
             </div>
 
@@ -702,6 +716,98 @@ export const GlobalBudgetPrintModal: React.FC<GlobalBudgetPrintModalProps> = ({
                 </tbody>
               </table>
             )}
+          </div>
+
+          {/* 5b. SEZIONE E: GESTIONE CONTABILE PRIMA NOTA & SPESE GENERALI DI STRUTTURA */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between border-b border-slate-300 pb-1">
+              <h3 className="text-xs font-black uppercase text-slate-900 flex items-center gap-1.5">
+                <Receipt className="w-3.5 h-3.5 text-emerald-700" />
+                <span>Sezione E • Spese Generali di Funzionamento &amp; Prima Nota ({annoSelezionato})</span>
+              </h3>
+              <span className="text-xs font-semibold text-slate-600">
+                Uscite Struttura: <strong>{(totaleUscitePrimaNota || 0).toLocaleString('it-IT')} €</strong> • Entrate Autonome: <strong>{(totaleEntratePrimaNota || 0).toLocaleString('it-IT')} €</strong>
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-[10px]">
+              {/* Tabella Uscite Generali di Sede */}
+              <table className="w-full border-collapse border border-slate-300 text-left">
+                <thead>
+                  <tr className="bg-slate-100 text-slate-700 font-bold uppercase text-[9px]">
+                    <th className="p-1.5 border border-slate-300">Voce di Spesa Generale / Struttura</th>
+                    <th className="p-1.5 border border-slate-300 text-right">Importo (€)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  <tr>
+                    <td className="p-1.5 border border-slate-300">Utenze Sede Sociale (Luce, gas, acqua, telecomunicazioni)</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-semibold">{(analisiMovimenti.speseUtenzeSede || 0).toLocaleString('it-IT')} €</td>
+                  </tr>
+                  <tr>
+                    <td className="p-1.5 border border-slate-300">Affitti Sede, Spazi Sociali &amp; Magazzini</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-semibold">{(analisiMovimenti.speseAffittiLocali || 0).toLocaleString('it-IT')} €</td>
+                  </tr>
+                  <tr>
+                    <td className="p-1.5 border border-slate-300">Polizze Assicurative (RC Pro Loco &amp; Volontari)</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-semibold">{(analisiMovimenti.speseAssicurazioni || 0).toLocaleString('it-IT')} €</td>
+                  </tr>
+                  <tr>
+                    <td className="p-1.5 border border-slate-300">Tipografia, Manifesti, Cancelleria &amp; Tessere Associative</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-semibold">{(analisiMovimenti.speseCancelleriaTipografia || 0).toLocaleString('it-IT')} €</td>
+                  </tr>
+                  <tr>
+                    <td className="p-1.5 border border-slate-300">Consulenze Fiscali, Amministrative &amp; Servizi Tecnici</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-semibold">{(analisiMovimenti.speseServiziConsulenze || 0).toLocaleString('it-IT')} €</td>
+                  </tr>
+                  <tr>
+                    <td className="p-1.5 border border-slate-300">Rimborsi Spese Documentati ai Volontari</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-semibold">{(analisiMovimenti.speseRimborsiVolontari || 0).toLocaleString('it-IT')} €</td>
+                  </tr>
+                  <tr>
+                    <td className="p-1.5 border border-slate-300">Materiali di Sede &amp; Altre Uscite Generali di Gestione</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-semibold">{((analisiMovimenti.speseMaterialiAttrezzatureAutonome || 0) + (analisiMovimenti.speseAltreAutonome || 0)).toLocaleString('it-IT')} €</td>
+                  </tr>
+                  <tr className="bg-slate-50 font-bold border-t-2 border-slate-400">
+                    <td className="p-1.5 border border-slate-300 font-black">Totale Uscite Generali di Struttura</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-black text-rose-900">{(totaleUscitePrimaNota || 0).toLocaleString('it-IT')} €</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              {/* Tabella Entrate Autonome da Prima Nota */}
+              <table className="w-full border-collapse border border-slate-300 text-left">
+                <thead>
+                  <tr className="bg-slate-100 text-slate-700 font-bold uppercase text-[9px]">
+                    <th className="p-1.5 border border-slate-300">Voce di Entrata Autonoma (Prima Nota)</th>
+                    <th className="p-1.5 border border-slate-300 text-right">Importo (€)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  <tr>
+                    <td className="p-1.5 border border-slate-300">Contributi Ordinari &amp; Straordinari Enti Pubblici (Comune, Regione, UNPLI)</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-semibold">{(analisiMovimenti.entrateContributiPubblici || 0).toLocaleString('it-IT')} €</td>
+                  </tr>
+                  <tr>
+                    <td className="p-1.5 border border-slate-300">Sponsorizzazioni Istituzionali &amp; Partner Commerciali</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-semibold">{(analisiMovimenti.entrateSponsorIstituzionali || 0).toLocaleString('it-IT')} €</td>
+                  </tr>
+                  <tr>
+                    <td className="p-1.5 border border-slate-300">Altre Entrate d'Esercizio &amp; Rimborsi Attivi</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-semibold">{(analisiMovimenti.entrateAltreAutonome || 0).toLocaleString('it-IT')} €</td>
+                  </tr>
+                  <tr className="bg-slate-50 font-bold border-t-2 border-slate-400">
+                    <td className="p-1.5 border border-slate-300 font-black">Totale Entrate Autonome Prima Nota</td>
+                    <td className="p-1.5 border border-slate-300 text-right font-mono font-black text-emerald-900">{(totaleEntratePrimaNota || 0).toLocaleString('it-IT')} €</td>
+                  </tr>
+                  <tr>
+                    <td colSpan={2} className="p-2 text-[9px] text-slate-500 italic bg-slate-50/50">
+                      * Nota metodologica: I movimenti di prima nota già originati da quote soci, donazioni ed eventi sono consolidati nelle rispettive sezioni tematiche senza alcuna duplicazione di cassa.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
 
           {/* 6. ATTESTAZIONE, VERBALE & FIRME COLLEGIALI */}

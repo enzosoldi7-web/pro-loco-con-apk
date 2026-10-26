@@ -13,7 +13,8 @@ import {
   DonazioneTerzi,
   CampagnaRaccoltaFondi,
   ElementoCestino,
-  ComunicazioneSocio
+  ComunicazioneSocio,
+  MovimentoContabile
 } from './types';
 import { 
   loadSoci, 
@@ -64,6 +65,8 @@ import {
   fetchActiveTunnelUrl,
   setActiveTryCloudflareUrl,
   buildSyncedMemberPortalUrl,
+  loadMovimentiContabili,
+  saveMovimentiContabili,
   GESTIONALE_VERSION
 } from './storage';
 import { Header } from './components/Header';
@@ -451,6 +454,23 @@ export default function App() {
         const nuovaLista = [eventoOriginale, ...eventi];
         setEventi(nuovaLista);
         saveEventi(nuovaLista);
+      }
+    } else if (item.tipoEntita === 'movimento') {
+      const movOriginale = item.datiOriginali as MovimentoContabile;
+      if (movOriginale) {
+        const movAttuali = loadMovimentiContabili();
+        if (!movAttuali.some(m => m.id === movOriginale.id)) {
+          const nuovaLista = [movOriginale, ...movAttuali];
+          saveMovimentiContabili(nuovaLista);
+          if (typeof window !== 'undefined') {
+            try {
+              window.dispatchEvent(new Event('storage'));
+              window.dispatchEvent(new CustomEvent('proloco_movimenti_updated', { detail: nuovaLista }));
+            } catch {
+              // ignore
+            }
+          }
+        }
       }
     }
     rimuoviDalCestino(item.id);

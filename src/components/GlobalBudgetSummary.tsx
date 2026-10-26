@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Socio, ProLocoEvento, ProLocoInfo, QuotaAssociativa, StandEvento, DonazioneTerzi, TipoDonatore } from '../types';
+import { Socio, ProLocoEvento, ProLocoInfo, QuotaAssociativa, StandEvento, DonazioneTerzi, TipoDonatore, MovimentoContabile } from '../types';
 import { 
   Building2,
   Euro,
@@ -73,13 +73,16 @@ import {
   loadDonazioni,
   saveDonazioni,
   esportaDonazioniCSV,
-  aggiungiAlCestino
+  aggiungiAlCestino,
+  loadMovimentiContabili,
+  saveMovimentiContabili
 } from '../storage';
+import { analizzaMovimentiPerBilancio } from '../utils/contabilitaHelpers';
 import { 
   calcolaScadenzaQuota, 
-  getSociNonRinnovati,
-  compilaTemplatePromemoria,
-  TEMPLATE_PROMEMORIA_PREDEFINITI
+  getSociNonRinnovati, 
+  compilaTemplatePromemoria, 
+  TEMPLATE_PROMEMORIA_PREDEFINITI 
 } from '../utils/quoteHelpers';
 import { 
   aggregaEventiPerBilancio, 
@@ -139,6 +142,12 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
   const [filtroRicercaDonatore, setFiltroRicercaDonatore] = useState<string>('');
   const [confermaEliminaDonazioneId, setConfermaEliminaDonazioneId] = useState<string | null>(null);
 
+  // Stato Gestione Contabile (Prima Nota)
+  const [movimenti, setMovimenti] = useState<MovimentoContabile[]>(() => loadMovimentiContabili());
+  const handleMovimentiChange = (nuovi: MovimentoContabile[]) => {
+    setMovimenti(nuovi);
+  };
+
   // Sincronizzazione con donazioni esterne e anno selezionato nell'header
   useEffect(() => {
     if (donazioni) {
@@ -149,6 +158,18 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
   useEffect(() => {
     setFiltroAnno(annoSelezionato);
   }, [annoSelezionato]);
+
+  useEffect(() => {
+    const handleSyncMovimenti = () => {
+      setMovimenti(loadMovimentiContabili());
+    };
+    window.addEventListener('storage', handleSyncMovimenti);
+    window.addEventListener('proloco_movimenti_updated', handleSyncMovimenti);
+    return () => {
+      window.removeEventListener('storage', handleSyncMovimenti);
+      window.removeEventListener('proloco_movimenti_updated', handleSyncMovimenti);
+    };
+  }, []);
 
   const sociAttivi = useMemo(() => soci.filter(s => !s.dataCancellazione), [soci]);
 
@@ -455,26 +476,38 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
     return `DON-${annoRif}-${String(conteggioAnno).padStart(3, '0')}`;
   }, [listaDonazioni, annoAttivo, config.annoCorrente]);
 
-  // 3. QUADRO GENERALE BILANCIO UNIFICATO (TESSERAMENTI + EVENTI + DONAZIONI DA TERZI)
+  // 2b. ANALISI MOVIMENTI CONTABILI (PRIMA NOTA ENTRATE E USCITE AUTONOME)
+  const analisiMovimenti = useMemo(() => {
+    return analizzaMovimentiPerBilancio(movimenti, annoAttivo || 'tutti');
+  }, [movimenti, annoAttivo]);
+
+  // 3. QUADRO GENERALE BILANCIO UNIFICATO (TESSERAMENTI + EVENTI + DONAZIONI DA TERZI + PRIMA NOTA)
   const bilancioGlobale = useMemo(() => {
-    const totaleEntrateGenerali = totaleQuote + totaliEventi.entrateRealizzate + totaleDonazioni;
-    const totaleUsciteGenerali = totaliEventi.costiConsuntivo;
+    const totaleEntratePrimaNota = analisiMovimenti.totaleEntrateAutonome;
+    const totaleUscitePrimaNota = analisiMovimenti.totaleUsciteAutonome;
+
+    const totaleEntrateGenerali = totaleQuote + totaliEventi.entrateRealizzate + totaleDonazioni + totaleEntratePrimaNota;
+    const totaleUsciteGenerali = totaliEventi.costiConsuntivo + totaleUscitePrimaNota;
     const avanzoGestione = totaleEntrateGenerali - totaleUsciteGenerali;
 
     // Incidenza percentuale entrate
     const percQuote = totaleEntrateGenerali > 0 ? (totaleQuote / totaleEntrateGenerali) * 100 : 0;
     const percEventi = totaleEntrateGenerali > 0 ? (totaliEventi.entrateRealizzate / totaleEntrateGenerali) * 100 : 0;
     const percDonazioni = totaleEntrateGenerali > 0 ? (totaleDonazioni / totaleEntrateGenerali) * 100 : 0;
+    const percPrimaNota = totaleEntrateGenerali > 0 ? (totaleEntratePrimaNota / totaleEntrateGenerali) * 100 : 0;
 
     return {
       totaleEntrate: totaleEntrateGenerali,
       totaleUscite: totaleUsciteGenerali,
       avanzoGestione,
+      totaleEntratePrimaNota,
+      totaleUscitePrimaNota,
       percQuote,
       percEventi,
-      percDonazioni
+      percDonazioni,
+      percPrimaNota
     };
-  }, [totaleQuote, totaliEventi, totaleDonazioni]);
+  }, [totaleQuote, totaliEventi, totaleDonazioni, analisiMovimenti]);
 
   // 3b. CALCOLO QUOTE SOCIALI DA INCASSARE & SCADENZA STATUTARIA ESERCIZIO
   const annoRiferimentoQuote = annoAttivo || config.annoCorrente;
@@ -691,9 +724,10 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
       ...(totaleDonazioni > 0 ? [{ name: 'Donazioni da Terzi (Art. 83 CTS)', value: totaleDonazioni, color: '#e11d48' }] : []),
       { name: 'Food & Stand Gastronomici', value: incassoFood, color: '#0d9488' },
       ...(incassoNonFood > 0 ? [{ name: 'Stand Servizi & Mercatini', value: incassoNonFood, color: '#6366f1' }] : []),
-      { name: 'Sponsor & Altre Entrate', value: altreEntrate > 0 ? altreEntrate : Math.round(totaliEventi.entrateRealizzate * 0.25), color: '#0284c7' }
+      { name: 'Sponsor & Manifestazioni', value: altreEntrate > 0 ? altreEntrate : Math.round(totaliEventi.entrateRealizzate * 0.25), color: '#0284c7' },
+      ...(analisiMovimenti.totaleEntrateAutonome > 0 ? [{ name: 'Contributi Pubblici & Prima Nota', value: analisiMovimenti.totaleEntrateAutonome, color: '#3b82f6' }] : [])
     ].filter(item => item.value > 0);
-  }, [totaleQuote, totaleDonazioni, totaliEventi.entrateRealizzate, consolidatoGlobaleStand]);
+  }, [totaleQuote, totaleDonazioni, totaliEventi.entrateRealizzate, consolidatoGlobaleStand, analisiMovimenti.totaleEntrateAutonome]);
 
   // Dati per Grafico a Torta delle USCITE
   const datiGraficoUscite = useMemo(() => {
@@ -706,9 +740,10 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
       { name: 'Food & Materie Prime Stand', value: spesaFood, color: '#059669' },
       { name: 'Musica, Artisti & SIAE', value: totaliEventi.intrattenimento, color: '#7c3aed' },
       { name: 'Allestimenti, Palco & Stand No-Food', value: spesaAllestimenti, color: '#0284c7' },
-      { name: 'Tipografia, Permessi & Oneri Vari', value: totaliEventi.varie, color: '#d97706' }
+      { name: 'Tipografia, Permessi & Oneri Vari', value: totaliEventi.varie, color: '#d97706' },
+      ...(analisiMovimenti.totaleUsciteAutonome > 0 ? [{ name: 'Spese Sede, Utenze & Funzionamento (Prima Nota)', value: analisiMovimenti.totaleUsciteAutonome, color: '#f59e0b' }] : [])
     ].filter(item => item.value > 0);
-  }, [totaliEventi, consolidatoGlobaleStand]);
+  }, [totaliEventi, consolidatoGlobaleStand, analisiMovimenti.totaleUsciteAutonome]);
 
   // Filtro circuiti per la Tabella Consolidata nel Quadro Generale
   const eventiStandFiltratiPerCircuito = useMemo(() => {
@@ -973,6 +1008,9 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
             <span>Quote: <strong>{(totaleQuote || 0).toLocaleString('it-IT')} €</strong></span>
             <span>Eventi: <strong>{(totaliEventi.entrateRealizzate || 0).toLocaleString('it-IT')} €</strong></span>
             <span className="text-emerald-700">Donazioni: <strong>{(totaleDonazioni || 0).toLocaleString('it-IT')} €</strong></span>
+            {bilancioGlobale.totaleEntratePrimaNota > 0 && (
+              <span className="text-blue-700">Contributi/PN: <strong>{(bilancioGlobale.totaleEntratePrimaNota || 0).toLocaleString('it-IT')} €</strong></span>
+            )}
           </div>
         </div>
 
@@ -989,10 +1027,13 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
               {(bilancioGlobale.totaleUscite || 0).toLocaleString('it-IT')} €
             </span>
           </div>
-          <div className="pt-2 border-t border-slate-100 text-[11px] text-slate-500 flex justify-between">
-            <span>Budget Previsto: <strong>{(totaliEventi.budgetPrevisto || 0).toLocaleString('it-IT')} €</strong></span>
+          <div className="pt-2 border-t border-slate-100 text-[10px] text-slate-500 flex flex-wrap justify-between gap-1">
+            <span>Eventi: <strong>{(totaliEventi.costiConsuntivo || 0).toLocaleString('it-IT')} €</strong></span>
+            {bilancioGlobale.totaleUscitePrimaNota > 0 && (
+              <span className="text-amber-800">Spese Sede/PN: <strong>{(bilancioGlobale.totaleUscitePrimaNota || 0).toLocaleString('it-IT')} €</strong></span>
+            )}
             <span className={(totaliEventi.differenzaCosti || 0) <= 0 ? 'text-emerald-700 font-bold' : 'text-rose-600 font-bold'}>
-              {(totaliEventi.differenzaCosti || 0) > 0 ? `+${(totaliEventi.differenzaCosti || 0)}` : (totaliEventi.differenzaCosti || 0)} €
+              Prev: {(totaliEventi.budgetPrevisto || 0).toLocaleString('it-IT')} €
             </span>
           </div>
         </div>
@@ -1182,7 +1223,7 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
           }`}
         >
           <Receipt className="w-4 h-4 text-emerald-400" />
-          <span>Gestione Contabile (Prima Nota)</span>
+          <span>Gestione Contabile (Prima Nota) ({analisiMovimenti.movimentiAnno.length})</span>
         </button>
 
         <button
@@ -1268,6 +1309,8 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
           soci={soci}
           eventi={eventi}
           donazioni={donazioni}
+          movimenti={movimenti}
+          onMovimentiChange={handleMovimentiChange}
         />
       )}
 
@@ -3716,6 +3759,22 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
                     {(totaleDonazioniDetraibili || 0).toLocaleString('it-IT')} €
                   </span>
                 </div>
+                <div className="p-3 bg-slate-50 font-bold text-slate-900 flex justify-between items-center">
+                  <span>D) Contributi pubblici e altre entrate da Prima Nota</span>
+                  <span className="text-[10px] text-blue-800 bg-blue-100 px-1.5 py-0.5 rounded font-bold">Prima Nota</span>
+                </div>
+                <div className="px-4 py-2 flex justify-between">
+                  <span>1. Contributi ordinari e straordinari Enti Pubblici (Comune, Regione, UNPLI)</span>
+                  <span className="font-mono font-medium">
+                    {(analisiMovimenti.entrateContributiPubblici || 0).toLocaleString('it-IT')} €
+                  </span>
+                </div>
+                <div className="px-4 py-2 flex justify-between">
+                  <span>2. Sponsorizzazioni istituzionali e altre entrate d'esercizio</span>
+                  <span className="font-mono font-medium">
+                    {((analisiMovimenti.entrateSponsorIstituzionali || 0) + (analisiMovimenti.entrateAltreAutonome || 0)).toLocaleString('it-IT')} €
+                  </span>
+                </div>
                 <div className="p-3 bg-emerald-50 font-black text-emerald-950 flex justify-between text-sm">
                   <span>TOTALE GENERALE ENTRATE</span>
                   <span className="font-mono">{(bilancioGlobale.totaleEntrate || 0).toLocaleString('it-IT')} €</span>
@@ -3753,12 +3812,37 @@ export const GlobalBudgetSummary: React.FC<GlobalBudgetSummaryProps> = ({
                   <span>4. Oneri vari, pubblicità, tipografia e permessi</span>
                   <span className="font-mono font-medium">{(totaliEventi.varie || 0).toLocaleString('it-IT')} €</span>
                 </div>
-                <div className="p-3 bg-slate-50 font-bold text-slate-900">
-                  B) Uscite per supporto e funzionamento associazione
+                <div className="p-3 bg-slate-50 font-bold text-slate-900 flex justify-between items-center">
+                  <span>B) Uscite per supporto generale e funzionamento sede (da Prima Nota)</span>
+                  <span className="text-[10px] text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded font-bold">Spese Generali</span>
                 </div>
-                <div className="px-4 py-2 flex justify-between text-slate-500">
-                  <span>1. Oneri generali di segreteria e tessere (inclusi in varie)</span>
-                  <span className="font-mono">Inclusi</span>
+                <div className="px-4 py-1.5 flex justify-between">
+                  <span>1. Utenze sede sociale (Luce, gas, acqua, telecomunicazioni)</span>
+                  <span className="font-mono font-medium">{(analisiMovimenti.speseUtenzeSede || 0).toLocaleString('it-IT')} €</span>
+                </div>
+                <div className="px-4 py-1.5 flex justify-between">
+                  <span>2. Affitti sede, spazi sociali e magazzini</span>
+                  <span className="font-mono font-medium">{(analisiMovimenti.speseAffittiLocali || 0).toLocaleString('it-IT')} €</span>
+                </div>
+                <div className="px-4 py-1.5 flex justify-between">
+                  <span>3. Polizze assicurative (RC Pro Loco e infortuni volontari)</span>
+                  <span className="font-mono font-medium">{(analisiMovimenti.speseAssicurazioni || 0).toLocaleString('it-IT')} €</span>
+                </div>
+                <div className="px-4 py-1.5 flex justify-between">
+                  <span>4. Tipografia, manifesti, cancelleria e tessere associative</span>
+                  <span className="font-mono font-medium">{(analisiMovimenti.speseCancelleriaTipografia || 0).toLocaleString('it-IT')} €</span>
+                </div>
+                <div className="px-4 py-1.5 flex justify-between">
+                  <span>5. Servizi tecnici, consulenze fiscali e amministrative</span>
+                  <span className="font-mono font-medium">{(analisiMovimenti.speseServiziConsulenze || 0).toLocaleString('it-IT')} €</span>
+                </div>
+                <div className="px-4 py-1.5 flex justify-between">
+                  <span>6. Rimborsi spese documentati volontari</span>
+                  <span className="font-mono font-medium">{(analisiMovimenti.speseRimborsiVolontari || 0).toLocaleString('it-IT')} €</span>
+                </div>
+                <div className="px-4 py-1.5 flex justify-between">
+                  <span>7. Materiali di sede e altre uscite generali di gestione</span>
+                  <span className="font-mono font-medium">{((analisiMovimenti.speseMaterialiAttrezzatureAutonome || 0) + (analisiMovimenti.speseAltreAutonome || 0)).toLocaleString('it-IT')} €</span>
                 </div>
                 <div className="p-3 bg-rose-50 font-black text-rose-950 flex justify-between text-sm">
                   <span>TOTALE GENERALE USCITE</span>

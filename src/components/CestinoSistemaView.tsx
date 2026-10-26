@@ -78,10 +78,10 @@ export const CestinoSistemaView: React.FC<CestinoSistemaViewProps> = ({
     });
   }, [elementi, filtroTipo, ricerca]);
 
-  // Conteggi per le schede
   const conteggioDonazioni = useMemo(() => elementi.filter(e => e.tipoEntita === 'donazione').length, [elementi]);
   const conteggioSoci = useMemo(() => elementi.filter(e => e.tipoEntita === 'socio').length, [elementi]);
   const conteggioEventi = useMemo(() => elementi.filter(e => e.tipoEntita === 'evento').length, [elementi]);
+  const conteggioMovimenti = useMemo(() => elementi.filter(e => e.tipoEntita === 'movimento').length, [elementi]);
 
   const handleRipristina = (item: ElementoCestino) => {
     onRipristinaElemento(item);
@@ -283,6 +283,24 @@ export const CestinoSistemaView: React.FC<CestinoSistemaViewProps> = ({
                 {conteggioEventi}
               </span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setFiltroTipo('movimento')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer border flex items-center gap-1.5 shrink-0 ${
+                filtroTipo === 'movimento'
+                  ? 'bg-purple-700 text-white border-purple-700 shadow-2xs'
+                  : 'bg-purple-50/70 text-purple-900 border-purple-200 hover:bg-purple-100'
+              }`}
+            >
+              <Receipt className="w-3.5 h-3.5" />
+              <span>Prima Nota / Contabilità</span>
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                filtroTipo === 'movimento' ? 'bg-white/20 text-white' : 'bg-purple-200 text-purple-900'
+              }`}>
+                {conteggioMovimenti}
+              </span>
+            </button>
           </div>
 
           {/* Campo Ricerca */}
@@ -364,6 +382,11 @@ export const CestinoSistemaView: React.FC<CestinoSistemaViewProps> = ({
                         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10.5px] font-black bg-blue-100 text-blue-900 border border-blue-300">
                           <Users className="w-3.5 h-3.5 text-blue-700" />
                           Socio Albo
+                        </span>
+                      ) : item.tipoEntita === 'movimento' ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10.5px] font-black bg-purple-100 text-purple-900 border border-purple-300">
+                          <Receipt className="w-3.5 h-3.5 text-purple-700" />
+                          Prima Nota
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10.5px] font-black bg-teal-100 text-teal-900 border border-teal-300">
